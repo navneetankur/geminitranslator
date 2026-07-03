@@ -2,15 +2,27 @@
 -- translation_job.lua — translate Chinese webnovel chapters via Gemini batch API
 --
 -- Usage:
---   translation_job.lua send <to_translate_dir>   -> submits a batch, writes id to batch.txt
---   translation_job.lua get  <batch.txt> <out_dir> -> if done, writes translated files
+--   translation_job.lua send <to_translate_dir>    -> upload + submit a batch, id to batch.txt
+--   translation_job.lua get  <batch.txt> <out_dir> -> if done, download + write translations
 --
--- Requires: curl, jq, and env var GEMINI_API_KEY
+-- File-based batch flow (robust retries): build a JSONL, upload it to the
+-- Files API (the flaky, retryable step), then create the batch pointing at
+-- the uploaded file (the cheap commit). See notes/overview.md.
+--
+-- Requires: curl, jq, file(1). API key is read from the dofile below.
 
-local MODEL   = "gemini-2.5-flash-lite"
-local API     = "https://generativelanguage.googleapis.com/v1beta"
-local KEY     = dofile(os.getenv("HOME").."/.config/geminitran/toktok.txt")
+local MODEL    = "gemini-2.5-flash-lite"
+local API      = "https://generativelanguage.googleapis.com/v1beta"
+local UPLOAD   = "https://generativelanguage.googleapis.com/upload/v1beta/files"
+local DOWNLOAD = "https://generativelanguage.googleapis.com/download/v1beta"
+local KEY      = dofile(os.getenv("HOME").."/.config/geminitran/toktok.txt")
 
+-- files we intentionally keep on disk (for debugging / resume)
+local F_JSONL   = "batch_input.jsonl"   -- the request payload we upload
+local F_RESUME  = "resume.txt"          -- uploaded file handle (breadcrumb)
+local F_BATCH   = "batch.txt"           -- submitted batch/operation name
+local F_RAW     = "batch_result.json"   -- raw GET response from `get`
+local F_RESULTS = "batch_results.jsonl" -- downloaded results file
 
 ----------------------------------------------------------------------
 -- small helpers
@@ -21,12 +33,12 @@ local function die(msg)
   os.exit(1)
 end
 
--- run a shell command, return stdout (trimmed) and success flag
+-- run a shell command, return stdout (trailing whitespace trimmed)
 local function sh(cmd)
   local f = assert(io.popen(cmd, "r"))
   local out = f:read("*a") or ""
-  local ok = f:close()
-  return (out:gsub("%s+$", "")), ok
+  f:close()
+  return (out:gsub("%s+$", ""))
 end
 
 local function file_exists(path)
@@ -77,13 +89,66 @@ local function list_inputs(dir)
 end
 
 ----------------------------------------------------------------------
+-- Files API upload (resumable protocol)
+----------------------------------------------------------------------
+
+-- upload a local file, return its "files/xxxx" handle. This is the
+-- retryable step: nothing is committed until the batch is created.
+local function upload_file(path, display)
+  local nbytes = sh("wc -c < " .. q(path))
+  local mime   = sh("file -b --mime-type " .. q(path)) -- server just wants a plausible type
+  local hdr    = os.tmpname()
+
+  -- step 1: start a resumable session; the upload URL comes back in a header
+  local start_payload = os.tmpname()
+  sh("jq -nc --arg d " .. q(display) .. " '{file:{display_name:$d}}' > " .. q(start_payload))
+  sh(table.concat({
+    "curl -sS -D " .. q(hdr) .. " -o /dev/null -X POST", q(UPLOAD),
+    "-H " .. q("x-goog-api-key: " .. KEY),
+    "-H " .. q("X-Goog-Upload-Protocol: resumable"),
+    "-H " .. q("X-Goog-Upload-Command: start"),
+    "-H " .. q("X-Goog-Upload-Header-Content-Length: " .. nbytes),
+    "-H " .. q("X-Goog-Upload-Header-Content-Type: " .. mime),
+    "-H " .. q("Content-Type: application/json"),
+    "-d @" .. q(start_payload),
+  }, " "))
+  os.remove(start_payload)
+
+  local upurl = sh("grep -i '^x-goog-upload-url:' " .. q(hdr) ..
+                   " | tr -d '\\r' | sed 's/^[^:]*: *//'")
+  os.remove(hdr)
+  if upurl == "" then
+    die("upload did not return an upload URL (check key / network); nothing committed")
+  end
+
+  -- step 2: send the bytes and finalize in one shot
+  local resp = sh(table.concat({
+    "curl -sS", q(upurl),
+    "-H " .. q("x-goog-api-key: " .. KEY),
+    "-H " .. q("X-Goog-Upload-Offset: 0"),
+    "-H " .. q("X-Goog-Upload-Command: upload, finalize"),
+    "--data-binary @" .. q(path),
+  }, " "))
+
+  local name = sh("printf %s " .. q(resp) .. " | jq -r '.file.name // empty'")
+  if name == "" then die("upload finalize returned no file name:\n" .. resp) end
+  return name
+end
+
+----------------------------------------------------------------------
 -- send
 ----------------------------------------------------------------------
 
 local function cmd_send(indir)
   if not indir then die("usage: translation_job.lua send <dir>") end
-  if not KEY then die("GEMINI_API_KEY is not set") end
+  if not KEY then die("no API key") end
   indir = indir:gsub("/+$", "")
+
+  -- guard against accidentally submitting (and paying for) a second batch
+  if file_exists(F_BATCH) and read_file(F_BATCH):gsub("%s+", "") ~= "" then
+    die(F_BATCH .. " already exists (" .. read_file(F_BATCH):gsub("%s+", "") ..
+        "). Delete it to submit a new batch.")
+  end
 
   -- locate prompt file
   local prompt_path = indir .. "/prompt.txt"
@@ -91,162 +156,152 @@ local function cmd_send(indir)
     prompt_path = (os.getenv("HOME") or "") .. "/.config/geminitran/prompt.txt"
   end
   if not file_exists(prompt_path) then
-    die("no prompt found at " .. indir .. "/prompt.txt or ~/.config/geminitran/prompt.txt")
+    die("no prompt at " .. indir .. "/prompt.txt or ~/.config/geminitran/prompt.txt")
   end
 
   local files = list_inputs(indir)
   if #files == 0 then die("no *.txt files to translate in " .. indir) end
 
-  -- build one inline request object per file (jq handles escaping)
-  local tmp = os.tmpname()
-  local reqs = assert(io.open(tmp, "w"))
+  -- build the JSONL: one {"key","request"} line per chapter (jq handles escaping)
+  local out = assert(io.open(F_JSONL, "w"))
   for _, name in ipairs(files) do
-    local one = sh(table.concat({
-      "jq -nc",
+    local line = sh(table.concat({
+      "jq -c",
       "--arg key " .. q(name),
       "--rawfile prompt " .. q(prompt_path),
       "--rawfile body " .. q(indir .. "/" .. name),
-      q('{request:{contents:[{parts:[{text:($prompt + "\\n\\n" + $body)}]}]}, metadata:{key:$key}}'),
+      "-n " .. q('{key:$key, request:{contents:[{parts:[{text:($prompt + "\\n\\n" + $body)}]}]}}'),
     }, " "))
-    reqs:write(one, "\n")
+    out:write(line, "\n")
   end
-  reqs:close()
+  out:close()
+  print("built " .. F_JSONL .. " (" .. #files .. " chapter(s))")
 
-  -- wrap all requests into the batch payload
+  -- upload (retryable; no commit yet)
+  print("uploading to Files API ...")
+  local fname = upload_file(F_JSONL, "webnovel-batch")
+  write_file(F_RESUME, fname .. "\n")
+  print("uploaded: " .. fname .. "  (recorded in " .. F_RESUME .. ")")
+
+  -- create the batch pointing at the uploaded file (the cheap commit)
   local payload = os.tmpname()
-  sh(table.concat({
-    "jq -s",
-    q('{batch:{display_name:"webnovel", input_config:{requests:{requests: .}}}}'),
-    "<", q(tmp), ">", q(payload),
-  }, " "))
-
-  print("submitting " .. #files .. " chapter(s) to " .. MODEL .. " ...")
+  sh("jq -nc --arg f " .. q(fname) ..
+     " '{batch:{display_name:\"webnovel\", input_config:{file_name:$f}}}' > " .. q(payload))
   local resp = sh(table.concat({
-    "curl -sS -X POST",
-    q(API .. "/models/" .. MODEL .. ":batchGenerateContent"),
+    "curl -sS -X POST", q(API .. "/models/" .. MODEL .. ":batchGenerateContent"),
     "-H " .. q("x-goog-api-key: " .. KEY),
     "-H " .. q("Content-Type: application/json"),
     "-d @" .. q(payload),
   }, " "))
-
-  os.remove(tmp)
   os.remove(payload)
 
-  -- the create call returns the long-running job; its .name is what we poll
   local batch_name = sh("printf %s " .. q(resp) .. " | jq -r '.name // empty'")
-  if batch_name == "" then
-    die("no batch name in response:\n" .. resp)
-  end
+  if batch_name == "" then die("batch not created:\n" .. resp) end
 
-  write_file("batch.txt", batch_name .. "\n")
+  write_file(F_BATCH, batch_name .. "\n")
   print("batch submitted: " .. batch_name)
-  print("wrote id to batch.txt")
+  print("wrote id to " .. F_BATCH)
+  print("(kept " .. F_JSONL .. " for reference; remove when done: rm " .. F_JSONL .. ")")
 end
 
 ----------------------------------------------------------------------
 -- get
 ----------------------------------------------------------------------
 
--- The GET returns a long-running Operation; its .response is a
--- GenerateContentBatchOutput whose .inlinedResponses.inlinedResponses[]
--- holds one entry per request. (.metadata.output mirrors the same data,
--- but .response is the operation's canonical result.)
-local ITEMS = ".response.inlinedResponses.inlinedResponses[]"
+-- PROVISIONAL: the docs are vague on where a *file-based* result points to
+-- its output file, so we coalesce the likely candidates. If `get` says it
+-- succeeded but finds no file, inspect batch_result.json and pin the path.
+local OUTFILE = table.concat({
+  ".response.responsesFile",
+  ".metadata.output.responsesFile",
+  ".dest.responsesFile",
+  ".dest.fileName",
+  ".dest.file_name",
+  "empty",
+}, " // ")
 
--- One short line per request: key <TAB> error-message <TAB> finishReason.
--- Kept small on purpose so it is safe to read via the shell; the actual
--- (potentially huge) translated text is never put on a command line —
--- it is streamed file -> jq -> file per key below.
-local STATUS = ITEMS .. [[
-  | [ (.metadata.key // "unknown"),
-      (.error.message // .response.error.message // ""),
-      (.response.candidates[0].finishReason // "") ]
-  | @tsv
-]]
-
--- Extract the full translated text for a single key, straight to stdout.
-local TEXT_FOR_KEY = ITEMS .. [[
-  | select((.metadata.key // "unknown") == $k)
-  | [ .response.candidates[]?.content.parts[]?.text ] | join("")
+-- per-line filter over the downloaded results JSONL -> key<TAB>ok<TAB>reason<TAB>b64(text).
+-- ok is false for API errors or a truncated/blocked finishReason, so callers
+-- can warn+skip instead of writing an empty/partial file.
+local RESULT_LINE = [[
+  (.response.candidates[0]) as $c
+  | { key:    .key,
+      ok:     ( ((.response.error // .error) == null)
+                and (($c.finishReason // "STOP") == "STOP") ),
+      reason: ( $c.finishReason
+                // (.response.error.message // .error.message // "no-candidate") ),
+      text:   ( [ $c.content.parts[]?.text ] | join("") ) }
+  | "\(.key)\t\(.ok)\t\(.reason)\t\(.text | @base64)"
 ]]
 
 local function cmd_get(batchfile, outdir)
   if not batchfile or not outdir then
     die("usage: translation_job.lua get <batch.txt> <out_dir>")
   end
-  if not KEY then die("GEMINI_API_KEY is not set") end
+  if not KEY then die("no API key") end
   outdir = outdir:gsub("/+$", "")
 
   local batch_name = read_file(batchfile):gsub("%s+", "")
   if batch_name == "" then die("empty batch id in " .. batchfile) end
 
   local resp = sh(table.concat({
-    "curl -sS",
-    q(API .. "/" .. batch_name),
+    "curl -sS", q(API .. "/" .. batch_name),
     "-H " .. q("x-goog-api-key: " .. KEY),
   }, " "))
+  write_file(F_RAW, resp .. "\n") -- always keep the raw response
 
-  -- Keep the raw response on disk and run all jq against the FILE. The
-  -- response can be many MB, so it must never be passed as a shell
-  -- argument (that hits ARG_MAX -> "Argument list too long").
-  local RESULT = "batch_result.json"
-  write_file(RESULT, resp .. "\n")
-  resp = nil  -- don't keep the big blob around; read from the file instead
-
-  local state = sh("jq -r '.metadata.state // .state // " ..
-    "(if .done then \"DONE\" else \"RUNNING\" end) // \"UNKNOWN\"' " .. q(RESULT))
+  local state = sh("printf %s " .. q(resp) ..
+    " | jq -r '.metadata.state // .state // (if .done then \"DONE\" else \"RUNNING\" end) // \"UNKNOWN\"'")
   print("batch state: " .. state)
 
   if not (state:match("SUCCEEDED") or state == "DONE") then
     if state:match("FAILED") or state:match("CANCELLED") or state:match("EXPIRED") then
-      die("batch did not succeed (state=" .. state .. "); see " .. RESULT)
+      die("batch did not succeed (state=" .. state .. "); see " .. F_RAW)
     end
-    print("not finished yet — try again later. (raw saved to " .. RESULT .. ")")
+    print("not finished yet — try again later. (raw saved to " .. F_RAW .. ")")
     return
   end
 
-  os.execute("mkdir -p " .. q(outdir))
-
-  -- small per-item status table: key, error, finishReason
-  local status = sh("jq -r " .. q(STATUS) .. " " .. q(RESULT))
-  if status == "" then
-    die("job succeeded but no responses found — inspect " .. RESULT ..
-        " to confirm the JSON path")
+  local rfile = sh("printf %s " .. q(resp) .. " | jq -r " .. q(OUTFILE))
+  if rfile == "" then
+    die("succeeded but no results-file field found — inspect " .. F_RAW ..
+        " and adjust the OUTFILE paths")
   end
 
-  local count, skipped = 0, 0
-  for line in status:gmatch("[^\n]+") do
-    local key, err, finish = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)$")
-    if not key or key == "" or key == "unknown" then
-      io.stderr:write("  ! response with no key — skipped (see " .. RESULT .. ")\n")
-      skipped = skipped + 1
-    elseif err ~= "" then
-      io.stderr:write("  ! " .. key .. ": request failed (" .. err .. ") — skipped\n")
-      skipped = skipped + 1
-    elseif finish ~= "" and finish ~= "STOP" then
-      -- e.g. MAX_TOKENS (truncated) or SAFETY (blocked): don't silently
-      -- write partial/empty output as if it were a clean translation.
-      io.stderr:write("  ! " .. key .. ": finishReason=" .. finish ..
-        " — skipped (not a clean STOP)\n")
-      skipped = skipped + 1
-    else
-      -- stream the text file -> jq -> output file; nothing large on argv
-      local out = outdir .. "/" .. key
-      local ok = os.execute("jq -j --arg k " .. q(key) .. " " ..
-        q(TEXT_FOR_KEY) .. " " .. q(RESULT) .. " > " .. q(out))
-      if ok then
-        count = count + 1
-        print("  wrote " .. out)
+  print("downloading results (" .. rfile .. ") ...")
+  sh(table.concat({
+    "curl -sS -o " .. q(F_RESULTS),
+    q(DOWNLOAD .. "/" .. rfile .. ":download?alt=media"),
+    "-H " .. q("x-goog-api-key: " .. KEY),
+  }, " "))
+  if not file_exists(F_RESULTS) then die("download produced no file") end
+
+  os.execute("mkdir -p " .. q(outdir))
+
+  local rows = sh("jq -rc " .. q(RESULT_LINE) .. " " .. q(F_RESULTS))
+  if rows == "" then
+    die("results file has no parseable lines — inspect " .. F_RESULTS)
+  end
+
+  local wrote, skipped = 0, 0
+  for line in rows:gmatch("[^\n]+") do
+    local key, ok, reason, b64 = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
+    if key and key ~= "" then
+      if ok == "true" then
+        local text = sh("printf %s " .. q(b64) .. " | base64 -d")
+        write_file(outdir .. "/" .. key, text)
+        wrote = wrote + 1
       else
-        io.stderr:write("  ! " .. key .. ": failed to write output\n")
+        io.stderr:write("  SKIP " .. key .. " (" .. reason .. ")\n")
         skipped = skipped + 1
       end
     end
   end
-  print(("done: %d written, %d skipped -> %s/"):format(count, skipped, outdir))
-  if skipped > 0 then
-    print("re-run those chapters through send/ after checking " .. RESULT)
-  end
+
+  print("done: " .. wrote .. " written to " .. outdir .. "/" ..
+        (skipped > 0 and (", " .. skipped .. " skipped — re-run those chapters") or ""))
+  print("(kept " .. F_RESULTS .. " and " .. F_RAW ..
+        "; remove when done: rm " .. F_RESULTS .. " " .. F_RAW .. ")")
 end
 
 ----------------------------------------------------------------------
