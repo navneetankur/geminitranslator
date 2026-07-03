@@ -1,0 +1,16 @@
+You are translating a Chinese web novel.
+
+Requirements:
+- Produce natural, readable English prose.
+- Preserve the meaning faithfully.
+- Keep dialogue natural.
+- Keep names and terminology consistent.
+- Use standard xianxia/wuxia conventions: keep core terms like Qi, Dao, and Dantian in pinyin, and use established English names for cultivation realms (e.g. Qi Refining, Foundation Establishment, Core Formation, Nascent Soul). Do not invent idiosyncratic English equivalents.
+- Translate all content faithfully, including mature, violent, or dark scenes. Do not censor, soften, or summarize.
+- Render onomatopoeia and interjections as natural English (e.g. 哼 -> "Hmph", 呵呵 -> "Heh", 砰 -> "Bang"). Do not leave them as pinyin or over-describe them.
+- Preserve paragraph breaks.
+- Output only the translated text.
+- Do not add notes or explanations.
+
+Chinese:
+

@@ -147,18 +147,27 @@ end
 -- get
 ----------------------------------------------------------------------
 
--- jq program that coalesces the two known API result shapes (Operation
--- wrapper vs. Batch resource) into a flat [{key, text}] stream.
-local EXTRACT = [[
-  ( .response.inlinedResponses.inlinedResponses
-    // .response.inlinedResponses
-    // .dest.inlinedResponses.inlinedResponses
-    // .dest.inlinedResponses
-    // [] ) as $rs
-  | $rs[]
-  | { key: (.metadata.key // .metadata // "unknown"),
-      text: ( [ (.response.candidates[]?.content.parts[]?.text) ] | join("") ) }
-  | "\(.key)\t\(.text | @base64)"
+-- The GET returns a long-running Operation; its .response is a
+-- GenerateContentBatchOutput whose .inlinedResponses.inlinedResponses[]
+-- holds one entry per request. (.metadata.output mirrors the same data,
+-- but .response is the operation's canonical result.)
+local ITEMS = ".response.inlinedResponses.inlinedResponses[]"
+
+-- One short line per request: key <TAB> error-message <TAB> finishReason.
+-- Kept small on purpose so it is safe to read via the shell; the actual
+-- (potentially huge) translated text is never put on a command line —
+-- it is streamed file -> jq -> file per key below.
+local STATUS = ITEMS .. [[
+  | [ (.metadata.key // "unknown"),
+      (.error.message // .response.error.message // ""),
+      (.response.candidates[0].finishReason // "") ]
+  | @tsv
+]]
+
+-- Extract the full translated text for a single key, straight to stdout.
+local TEXT_FOR_KEY = ITEMS .. [[
+  | select((.metadata.key // "unknown") == $k)
+  | [ .response.candidates[]?.content.parts[]?.text ] | join("")
 ]]
 
 local function cmd_get(batchfile, outdir)
@@ -177,40 +186,67 @@ local function cmd_get(batchfile, outdir)
     "-H " .. q("x-goog-api-key: " .. KEY),
   }, " "))
 
-  -- always keep the raw response so we can inspect / adjust paths if needed
-  write_file("batch_result.json", resp .. "\n")
+  -- Keep the raw response on disk and run all jq against the FILE. The
+  -- response can be many MB, so it must never be passed as a shell
+  -- argument (that hits ARG_MAX -> "Argument list too long").
+  local RESULT = "batch_result.json"
+  write_file(RESULT, resp .. "\n")
+  resp = nil  -- don't keep the big blob around; read from the file instead
 
-  local state = sh("printf %s " .. q(resp) ..
-    " | jq -r '.metadata.state // .state // (if .done then \"DONE\" else \"RUNNING\" end) // \"UNKNOWN\"'")
+  local state = sh("jq -r '.metadata.state // .state // " ..
+    "(if .done then \"DONE\" else \"RUNNING\" end) // \"UNKNOWN\"' " .. q(RESULT))
   print("batch state: " .. state)
 
   if not (state:match("SUCCEEDED") or state == "DONE") then
     if state:match("FAILED") or state:match("CANCELLED") or state:match("EXPIRED") then
-      die("batch did not succeed (state=" .. state .. "); see batch_result.json")
+      die("batch did not succeed (state=" .. state .. "); see " .. RESULT)
     end
-    print("not finished yet — try again later. (raw saved to batch_result.json)")
+    print("not finished yet — try again later. (raw saved to " .. RESULT .. ")")
     return
   end
 
   os.execute("mkdir -p " .. q(outdir))
 
-  local rows = sh("printf %s " .. q(resp) .. " | jq -r " .. q(EXTRACT))
-  if rows == "" then
-    die("job succeeded but no responses extracted — inspect batch_result.json to " ..
-        "confirm the JSON path, then adjust the EXTRACT filter")
+  -- small per-item status table: key, error, finishReason
+  local status = sh("jq -r " .. q(STATUS) .. " " .. q(RESULT))
+  if status == "" then
+    die("job succeeded but no responses found — inspect " .. RESULT ..
+        " to confirm the JSON path")
   end
 
-  local count = 0
-  for line in rows:gmatch("[^\n]+") do
-    local key, b64 = line:match("^([^\t]*)\t(.*)$")
-    if key and key ~= "" then
-      local text = sh("printf %s " .. q(b64) .. " | base64 -d")
-      write_file(outdir .. "/" .. key, text)
-      count = count + 1
-      print("  wrote " .. outdir .. "/" .. key)
+  local count, skipped = 0, 0
+  for line in status:gmatch("[^\n]+") do
+    local key, err, finish = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)$")
+    if not key or key == "" or key == "unknown" then
+      io.stderr:write("  ! response with no key — skipped (see " .. RESULT .. ")\n")
+      skipped = skipped + 1
+    elseif err ~= "" then
+      io.stderr:write("  ! " .. key .. ": request failed (" .. err .. ") — skipped\n")
+      skipped = skipped + 1
+    elseif finish ~= "" and finish ~= "STOP" then
+      -- e.g. MAX_TOKENS (truncated) or SAFETY (blocked): don't silently
+      -- write partial/empty output as if it were a clean translation.
+      io.stderr:write("  ! " .. key .. ": finishReason=" .. finish ..
+        " — skipped (not a clean STOP)\n")
+      skipped = skipped + 1
+    else
+      -- stream the text file -> jq -> output file; nothing large on argv
+      local out = outdir .. "/" .. key
+      local ok = os.execute("jq -j --arg k " .. q(key) .. " " ..
+        q(TEXT_FOR_KEY) .. " " .. q(RESULT) .. " > " .. q(out))
+      if ok then
+        count = count + 1
+        print("  wrote " .. out)
+      else
+        io.stderr:write("  ! " .. key .. ": failed to write output\n")
+        skipped = skipped + 1
+      end
     end
   end
-  print("done: " .. count .. " file(s) written to " .. outdir .. "/")
+  print(("done: %d written, %d skipped -> %s/"):format(count, skipped, outdir))
+  if skipped > 0 then
+    print("re-run those chapters through send/ after checking " .. RESULT)
+  end
 end
 
 ----------------------------------------------------------------------
