@@ -9,7 +9,8 @@
 
 local MODEL   = "gemini-2.5-flash-lite"
 local API     = "https://generativelanguage.googleapis.com/v1beta"
-local KEY     = os.getenv("GEMINI_API_KEY")
+local KEY     = dofile(os.getenv("HOME").."/.config/geminitran/toktok.txt")
+
 
 ----------------------------------------------------------------------
 -- small helpers
