@@ -211,19 +211,21 @@ end
 -- the completed batch points at its output file here (confirmed against a real run)
 local OUTFILE = ".response.responsesFile // empty"
 
--- per-line filter over the downloaded results JSONL -> key<TAB>ok<TAB>reason<TAB>b64(text).
--- ok requires an actual candidate that finished with STOP; anything else (an
--- error line, a truncated MAX_TOKENS, or an unrecognized shape with no
--- candidate) is ok=false, so callers warn+skip instead of writing an
--- empty/partial file.
+-- per-line filter over the downloaded results JSONL -> key<TAB>status<TAB>reason<TAB>b64(text).
+-- status is one of:
+--   ok        - a candidate finished with STOP; text is complete
+--   truncated - a candidate exists but stopped early (MAX_TOKENS etc.); text is partial
+--   failed    - no candidate at all (error line or unrecognized shape); no text
 local RESULT_LINE = [[
   (.response.candidates[0]) as $c
   | { key:    .key,
-      ok:     ( $c != null and .response.error == null and $c.finishReason == "STOP" ),
+      status: ( if $c == null then "failed"
+                elif $c.finishReason == "STOP" then "ok"
+                else "truncated" end ),
       reason: ( if $c == null then (.response.error.message // "no-candidate")
-                else $c.finishReason end ),
+                else ($c.finishReason // "unknown") end ),
       text:   ( [ $c.content.parts[]?.text ] | join("") ) }
-  | "\(.key)\t\(.ok)\t\(.reason)\t\(.text | @base64)"
+  | "\(.key)\t\(.status)\t\(.reason)\t\(.text | @base64)"
 ]]
 
 local function cmd_get(batchfile, outdir)
@@ -275,23 +277,30 @@ local function cmd_get(batchfile, outdir)
     die("results file has no parseable lines — inspect " .. F_RESULTS)
   end
 
-  local wrote, skipped = 0, 0
+  local wrote, truncated, failed = 0, 0, 0
   for line in rows:gmatch("[^\n]+") do
-    local key, ok, reason, b64 = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
+    local key, status, reason, b64 = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
     if key and key ~= "" then
-      if ok == "true" then
-        local text = sh("printf %s " .. q(b64) .. " | base64 -d")
-        write_file(outdir .. "/" .. key, text)
+      local text = sh("printf %s " .. q(b64) .. " | base64 -d")
+      local path = outdir .. "/" .. key
+      if status == "ok" then
+        write_file(path, text)
         wrote = wrote + 1
-      else
-        io.stderr:write("  SKIP " .. key .. " (" .. reason .. ")\n")
-        skipped = skipped + 1
+      elseif status == "truncated" then
+        -- keep whatever partial text came back, but mark it clearly
+        write_file(path, text .. "\n\nThis file truncated. (" .. reason .. ")\n")
+        print("  TRUNCATED " .. key .. " (" .. reason .. ") — wrote partial; re-run this chapter")
+        truncated = truncated + 1
+      else -- failed
+        write_file(path, "This file failed. (" .. reason .. ")\n")
+        print("  FAILED " .. key .. " (" .. reason .. ") — re-run this chapter")
+        failed = failed + 1
       end
     end
   end
 
-  print("done: " .. wrote .. " written to " .. outdir .. "/" ..
-        (skipped > 0 and (", " .. skipped .. " skipped — re-run those chapters") or ""))
+  print("done: " .. wrote .. " ok, " .. truncated .. " truncated, " .. failed ..
+        " failed — written to " .. outdir .. "/")
   print("(kept " .. F_RESULTS .. " and " .. F_RAW ..
         "; remove when done: rm " .. F_RESULTS .. " " .. F_RAW .. ")")
 end
