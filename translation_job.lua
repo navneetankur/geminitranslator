@@ -340,8 +340,18 @@ local function cmd_get(batchfile, outdir)
 
   print("done: " .. wrote .. " ok, " .. truncated .. " truncated, " .. failed ..
         " failed — written to " .. outdir .. "/")
-  print("(kept " .. F_RESULTS .. " and " .. F_RAW ..
-        "; remove when done: rm " .. F_RESULTS .. " " .. F_RAW .. ")")
+  if truncated == 0 and failed == 0 then
+    -- clean run: nothing left to re-do, so all the batch artifacts are junk
+    local junk = {}
+    for _, f in ipairs({ F_RESULTS, F_RAW, F_JSONL, batchfile }) do
+      if file_exists(f) then junk[#junk + 1] = f end
+    end
+    print("all ok — clean up when done:  rm " .. table.concat(junk, " "))
+  else
+    -- keep everything: re-running the bad chapters needs these
+    print("(kept " .. F_RESULTS .. " and " .. F_RAW ..
+          " for re-runs; don't delete until every chapter is ok)")
+  end
 end
 
 ----------------------------------------------------------------------
