@@ -7,6 +7,7 @@
 --   translation_job.lua get    <batch.txt> <out_dir> -> if done, download + write translations
 --   translation_job.lua status [batch.txt|id ...]    -> report batch state(s); no args = list all
 --   translation_job.lua stop   <batch.txt|id>        -> cancel a running batch
+--   translation_job.lua delete-file <files/xxx>      -> delete an output file from the Files API
 --   translation_job.lua quick  <in.txt> [out.txt]    -> translate one chapter now (no batch)
 --
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
@@ -537,6 +538,28 @@ local function cmd_stop(arg1)
 end
 
 ----------------------------------------------------------------------
+-- delete-file — delete a file from the Files API. Handy for reclaiming the
+-- batch output file (the `responsesFile`, files/xxx) once results are pulled.
+----------------------------------------------------------------------
+
+local function cmd_delete_file(name)
+  if not name then die("usage: translation_job.lua delete-file <files/xxx>") end
+  if not KEY then die("no API key") end
+  name = name:gsub("%s+", "")
+  if name == "" then die("empty file name") end
+
+  local resp = sh(table.concat({
+    "curl -sS -X DELETE", q(API .. "/" .. name),
+    "-H " .. q("x-goog-api-key: " .. KEY),
+  }, " "))
+
+  local err = sh("printf %s " .. q(resp) .. " | jq -r '.error.message // empty'")
+  if err ~= "" then die("delete failed: " .. err) end
+
+  print("deleted " .. name)
+end
+
+----------------------------------------------------------------------
 -- dispatch
 ----------------------------------------------------------------------
 
@@ -553,6 +576,8 @@ elseif mode == "status" then
   cmd_status(names)
 elseif mode == "stop" then
   cmd_stop(arg[2])
+elseif mode == "delete-file" then
+  cmd_delete_file(arg[2])
 elseif mode == "quick" then
   cmd_quick(arg[2], arg[3])
 else
@@ -562,5 +587,6 @@ else
       "  translation_job.lua get    <batch.txt> <out_dir>\n" ..
       "  translation_job.lua status [batch.txt|id ...]\n" ..
       "  translation_job.lua stop   <batch.txt|id>\n" ..
+      "  translation_job.lua delete-file <files/xxx>\n" ..
       "  translation_job.lua quick  <in.txt> [out.txt]")
 end
