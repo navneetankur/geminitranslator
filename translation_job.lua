@@ -7,8 +7,8 @@
 --   translation_job.lua get    <batch.txt> <out_dir> -> if done, download + write translations
 --   translation_job.lua status [batch.txt|id ...]    -> report batch state(s); no args = list all
 --   translation_job.lua stop   <batch.txt|id>        -> cancel a running batch
---   translation_job.lua delete-file <files/xxx>      -> delete an output file from the Files API
---   translation_job.lua delete-job  <batch.txt|id>   -> delete the batch job (and its files)
+--   translation_job.lua delete-file <files/xxx>      -> delete an uploaded input file from the Files API
+--   translation_job.lua delete-job  <batch.txt|id>   -> delete the batch job (and its output file)
 --   translation_job.lua quick  <in.txt> [out.txt]    -> translate one chapter now (no batch)
 --
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
@@ -529,11 +529,12 @@ local function cmd_status(names)
       print("finished " .. b.label .. " — run `get` within ~48h (the batch and its " ..
             "output are auto-purged after that). free quota sooner with:")
       if has_out then
-        print("  " .. self .. " delete-file " .. b.output ..
-              "   # only after `get` has downloaded the results")
+        print("  " .. self .. " delete-job " .. b.label ..
+              "   # removes the batch + its output file (after `get`)")
       end
       if has_in then
-        print("  " .. self .. " delete-file " .. b.input)
+        print("  " .. self .. " delete-file " .. b.input ..
+              "   # the uploaded input; delete-job does NOT remove it")
       end
     end
   end
@@ -568,8 +569,10 @@ local function cmd_stop(arg1)
 end
 
 ----------------------------------------------------------------------
--- delete-file — delete a file from the Files API. Handy for reclaiming the
--- batch output file (the `responsesFile`, files/xxx) once results are pulled.
+-- delete-file — delete a file from the Files API by its files/xxx handle.
+-- Used for the uploaded input file. NOTE: it can't delete a batch's output
+-- file — those names (batch-<id>) exceed the API's 40-char id limit; the way
+-- to drop the output is `delete-job` (or the 48h auto-purge).
 ----------------------------------------------------------------------
 
 local function cmd_delete_file(name)
@@ -590,9 +593,10 @@ local function cmd_delete_file(name)
 end
 
 ----------------------------------------------------------------------
--- delete-job — delete the batch resource itself. Deleting the batch is
--- expected to take its dependent input/output files with it. Takes a batch
--- id or a file holding one (same convention as `stop`/`status`).
+-- delete-job — delete the batch resource itself. This also removes the batch's
+-- generated output file, but NOT the uploaded input file (that's a separate
+-- resource — drop it with `delete-file`). Takes a batch id or a file holding
+-- one (same convention as `stop`/`status`).
 ----------------------------------------------------------------------
 
 local function cmd_delete_job(arg1)
