@@ -8,6 +8,7 @@
 --   translation_job.lua status [batch.txt|id ...]    -> report batch state(s); no args = list all
 --   translation_job.lua stop   <batch.txt|id>        -> cancel a running batch
 --   translation_job.lua delete-file <files/xxx>      -> delete an output file from the Files API
+--   translation_job.lua delete-job  <batch.txt|id>   -> delete the batch job (and its files)
 --   translation_job.lua quick  <in.txt> [out.txt]    -> translate one chapter now (no batch)
 --
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
@@ -627,6 +628,31 @@ local function cmd_delete_file(name)
 end
 
 ----------------------------------------------------------------------
+-- delete-job — delete the batch resource itself. Deleting the batch is
+-- expected to take its dependent input/output files with it. Takes a batch
+-- id or a file holding one (same convention as `stop`/`status`).
+----------------------------------------------------------------------
+
+local function cmd_delete_job(arg1)
+  if not arg1 then die("usage: translation_job.lua delete-job <batch.txt|id>") end
+  if not KEY then die("no API key") end
+
+  local name = arg1
+  if file_exists(arg1) then name = read_file(arg1):gsub("%s+", "") end
+  if name == "" then die("empty batch id in " .. arg1) end
+
+  local resp = sh(table.concat({
+    "curl -sS -X DELETE", q(API .. "/" .. name),
+    "-H " .. q("x-goog-api-key: " .. KEY),
+  }, " "))
+
+  local err = sh("printf %s " .. q(resp) .. " | jq -r '.error.message // empty'")
+  if err ~= "" then die("delete failed: " .. err) end
+
+  print("deleted batch job " .. name)
+end
+
+----------------------------------------------------------------------
 -- dispatch
 ----------------------------------------------------------------------
 
@@ -645,6 +671,8 @@ elseif mode == "stop" then
   cmd_stop(arg[2])
 elseif mode == "delete-file" then
   cmd_delete_file(arg[2])
+elseif mode == "delete-job" then
+  cmd_delete_job(arg[2])
 elseif mode == "quick" then
   cmd_quick(arg[2], arg[3])
 else
@@ -655,5 +683,6 @@ else
       "  translation_job.lua status [batch.txt|id ...]\n" ..
       "  translation_job.lua stop   <batch.txt|id>\n" ..
       "  translation_job.lua delete-file <files/xxx>\n" ..
+      "  translation_job.lua delete-job  <batch.txt|id>\n" ..
       "  translation_job.lua quick  <in.txt> [out.txt]")
 end
