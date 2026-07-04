@@ -2,9 +2,10 @@
 -- translation_job.lua — translate Chinese webnovel chapters via Gemini batch API
 --
 -- Usage:
---   translation_job.lua send  <to_translate_dir>    -> upload + submit a batch, id to batch.txt
---   translation_job.lua get   <batch.txt> <out_dir> -> if done, download + write translations
---   translation_job.lua quick <in.txt> [out.txt]    -> translate one chapter now (no batch)
+--   translation_job.lua send   <to_translate_dir>    -> upload + submit a batch, id to batch.txt
+--   translation_job.lua resume <resume.txt>          -> submit a batch from an already-uploaded file
+--   translation_job.lua get    <batch.txt> <out_dir> -> if done, download + write translations
+--   translation_job.lua quick  <in.txt> [out.txt]    -> translate one chapter now (no batch)
 --
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
 -- Files API (the flaky, retryable step), then create the batch pointing at
@@ -148,6 +149,22 @@ local function upload_file(path, display)
   return name
 end
 
+-- create a batch pointing at an already-uploaded file handle (the cheap
+-- commit). Returns the batch/operation name (or "") and the raw response.
+local function create_batch(fname)
+  local payload = os.tmpname()
+  sh("jq -nc --arg f " .. q(fname) ..
+     " '{batch:{display_name:\"webnovel\", input_config:{file_name:$f}}}' > " .. q(payload))
+  local resp = sh(table.concat({
+    "curl -sS -X POST", q(API .. "/models/" .. MODEL .. ":batchGenerateContent"),
+    "-H " .. q("x-goog-api-key: " .. KEY),
+    "-H " .. q("Content-Type: application/json"),
+    "-d @" .. q(payload),
+  }, " "))
+  os.remove(payload)
+  return sh("printf %s " .. q(resp) .. " | jq -r '.name // empty'"), resp
+end
+
 ----------------------------------------------------------------------
 -- send
 ----------------------------------------------------------------------
@@ -161,6 +178,12 @@ local function cmd_send(indir)
   if file_exists(F_BATCH) and read_file(F_BATCH):gsub("%s+", "") ~= "" then
     die(F_BATCH .. " already exists (" .. read_file(F_BATCH):gsub("%s+", "") ..
         "). Delete it to submit a new batch.")
+  end
+  -- guard against re-uploading when a prior upload was never submitted
+  if file_exists(F_RESUME) and read_file(F_RESUME):gsub("%s+", "") ~= "" then
+    die(F_RESUME .. " exists — a prior upload was not submitted.\n" ..
+        "  finish it:     translation_job.lua resume " .. F_RESUME .. "\n" ..
+        "  or start over: rm " .. F_RESUME)
   end
 
   local prompt_path = resolve_prompt(indir)
@@ -190,21 +213,14 @@ local function cmd_send(indir)
   print("uploaded: " .. fname .. "  (recorded in " .. F_RESUME .. ")")
 
   -- create the batch pointing at the uploaded file (the cheap commit)
-  local payload = os.tmpname()
-  sh("jq -nc --arg f " .. q(fname) ..
-     " '{batch:{display_name:\"webnovel\", input_config:{file_name:$f}}}' > " .. q(payload))
-  local resp = sh(table.concat({
-    "curl -sS -X POST", q(API .. "/models/" .. MODEL .. ":batchGenerateContent"),
-    "-H " .. q("x-goog-api-key: " .. KEY),
-    "-H " .. q("Content-Type: application/json"),
-    "-d @" .. q(payload),
-  }, " "))
-  os.remove(payload)
-
-  local batch_name = sh("printf %s " .. q(resp) .. " | jq -r '.name // empty'")
-  if batch_name == "" then die("batch not created:\n" .. resp) end
+  local batch_name, resp = create_batch(fname)
+  if batch_name == "" then
+    die("upload succeeded but the batch was not created:\n" .. resp ..
+        "\n  the upload is saved — finish with: translation_job.lua resume " .. F_RESUME)
+  end
 
   write_file(F_BATCH, batch_name .. "\n")
+  os.remove(F_RESUME) -- committed; clear the pending-upload breadcrumb
   print("batch submitted: " .. batch_name)
   print("wrote id to " .. F_BATCH)
   print("(kept " .. F_JSONL .. " for reference; remove when done: rm " .. F_JSONL .. ")")
@@ -312,6 +328,34 @@ local function cmd_get(batchfile, outdir)
 end
 
 ----------------------------------------------------------------------
+-- resume — submit a batch from an already-uploaded file (recover a send
+-- that uploaded but failed/was interrupted before creating the batch)
+----------------------------------------------------------------------
+
+local function cmd_resume(resumefile)
+  resumefile = resumefile or F_RESUME
+  if not KEY then die("no API key") end
+  if not file_exists(resumefile) then die("no such file: " .. resumefile) end
+
+  if file_exists(F_BATCH) and read_file(F_BATCH):gsub("%s+", "") ~= "" then
+    die(F_BATCH .. " already exists (" .. read_file(F_BATCH):gsub("%s+", "") ..
+        "); nothing to resume.")
+  end
+
+  local fname = read_file(resumefile):gsub("%s+", "")
+  if fname == "" then die("no file handle in " .. resumefile) end
+
+  print("resuming from " .. fname .. " ...")
+  local batch_name, resp = create_batch(fname)
+  if batch_name == "" then die("batch still not created:\n" .. resp) end
+
+  write_file(F_BATCH, batch_name .. "\n")
+  os.remove(resumefile)
+  print("batch submitted: " .. batch_name)
+  print("wrote id to " .. F_BATCH)
+end
+
+----------------------------------------------------------------------
 -- quick — synchronous single-chapter translation (no batch, immediate)
 ----------------------------------------------------------------------
 
@@ -364,13 +408,16 @@ end
 local mode = arg[1]
 if mode == "send" then
   cmd_send(arg[2])
+elseif mode == "resume" then
+  cmd_resume(arg[2])
 elseif mode == "get" then
   cmd_get(arg[2], arg[3])
 elseif mode == "quick" then
   cmd_quick(arg[2], arg[3])
 else
   die("usage:\n" ..
-      "  translation_job.lua send  <to_translate_dir>\n" ..
-      "  translation_job.lua get   <batch.txt> <out_dir>\n" ..
-      "  translation_job.lua quick <in.txt> [out.txt]")
+      "  translation_job.lua send   <to_translate_dir>\n" ..
+      "  translation_job.lua resume <resume.txt>\n" ..
+      "  translation_job.lua get    <batch.txt> <out_dir>\n" ..
+      "  translation_job.lua quick  <in.txt> [out.txt]")
 end
