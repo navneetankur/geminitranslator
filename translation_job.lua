@@ -5,6 +5,7 @@
 --   translation_job.lua send   <to_translate_dir>    -> upload + submit a batch, id to batch.txt
 --   translation_job.lua resume <resume.txt>          -> submit a batch from an already-uploaded file
 --   translation_job.lua get    <batch.txt> <out_dir> -> if done, download + write translations
+--   translation_job.lua status [batch.txt|id ...]    -> report batch state(s); no args = list all
 --   translation_job.lua quick  <in.txt> [out.txt]    -> translate one chapter now (no batch)
 --
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
@@ -431,6 +432,65 @@ local function cmd_quick(infile, outfile)
 end
 
 ----------------------------------------------------------------------
+-- status — report batch state(s); no args lists every batch.
+-- Exits 0 if ANY batch has finished (SUCCEEDED/DONE), else 1, so it
+-- composes in shells: translation_job.lua status batch.txt && echo ready
+----------------------------------------------------------------------
+
+-- three fields from a single operation (a GET-by-name response)
+local STATUS3 = '[ (.metadata.state // .state // "UNKNOWN"),' ..
+  ' (.metadata.batchStats.successfulRequestCount // 0),' ..
+  ' (.metadata.batchStats.requestCount // 0) ] | @tsv'
+-- name + those three, per operation in a list response
+local STATUS_LIST = '(.operations // .batches // [])[] | [ .name,' ..
+  ' (.metadata.state // .state // "UNKNOWN"),' ..
+  ' (.metadata.batchStats.successfulRequestCount // 0),' ..
+  ' (.metadata.batchStats.requestCount // 0) ] | @tsv'
+
+local function cmd_status(names)
+  if not KEY then die("no API key") end
+
+  local any_done = false
+  local function report(label, state, succ, total)
+    state = (state and state ~= "") and state or "UNKNOWN"
+    print(string.format("%-46s %-24s %s/%s", label, state, succ or "0", total or "0"))
+    if state:match("SUCCEEDED") or state == "DONE" then any_done = true end
+  end
+
+  print(string.format("%-46s %-24s %s", "BATCH", "STATE", "DONE/TOTAL"))
+
+  if #names == 0 then
+    -- list every batch
+    local resp = sh(table.concat({
+      "curl -sS", q(API .. "/batches?pageSize=100"),
+      "-H " .. q("x-goog-api-key: " .. KEY),
+    }, " "))
+    local tmp = os.tmpname(); write_file(tmp, resp)
+    local out = sh("jq -r " .. q(STATUS_LIST) .. " " .. q(tmp))
+    os.remove(tmp)
+    for line in out:gmatch("[^\n]+") do
+      local name, st, su, to = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+      report(name or "?", st, su, to)
+    end
+  else
+    -- check the specific batches given (id, or a file holding one)
+    for _, arg in ipairs(names) do
+      local name = arg
+      if file_exists(arg) then name = read_file(arg):gsub("%s+", "") end
+      local resp = sh(table.concat({
+        "curl -sS", q(API .. "/" .. name),
+        "-H " .. q("x-goog-api-key: " .. KEY),
+      }, " "))
+      local row = sh("printf %s " .. q(resp) .. " | jq -r " .. q(STATUS3))
+      local st, su, to = row:match("^([^\t]*)\t([^\t]*)\t([^\t]*)$")
+      report(arg, st, su, to)
+    end
+  end
+
+  os.exit(any_done and 0 or 1)
+end
+
+----------------------------------------------------------------------
 -- dispatch
 ----------------------------------------------------------------------
 
@@ -441,6 +501,10 @@ elseif mode == "resume" then
   cmd_resume(arg[2])
 elseif mode == "get" then
   cmd_get(arg[2], arg[3])
+elseif mode == "status" then
+  local names = {}
+  for i = 2, #arg do names[#names + 1] = arg[i] end
+  cmd_status(names)
 elseif mode == "quick" then
   cmd_quick(arg[2], arg[3])
 else
@@ -448,5 +512,6 @@ else
       "  translation_job.lua send   <to_translate_dir>\n" ..
       "  translation_job.lua resume <resume.txt>\n" ..
       "  translation_job.lua get    <batch.txt> <out_dir>\n" ..
+      "  translation_job.lua status [batch.txt|id ...]\n" ..
       "  translation_job.lua quick  <in.txt> [out.txt]")
 end
