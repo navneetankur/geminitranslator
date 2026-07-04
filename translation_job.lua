@@ -6,6 +6,7 @@
 --   translation_job.lua resume <resume.txt>          -> submit a batch from an already-uploaded file
 --   translation_job.lua get    <batch.txt> <out_dir> -> if done, download + write translations
 --   translation_job.lua status [batch.txt|id ...]    -> report batch state(s); no args = list all
+--   translation_job.lua stop   <batch.txt|id>        -> cancel a running batch
 --   translation_job.lua quick  <in.txt> [out.txt]    -> translate one chapter now (no batch)
 --
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
@@ -510,6 +511,32 @@ local function cmd_status(names)
 end
 
 ----------------------------------------------------------------------
+-- stop — cancel a running batch. The batch keeps its name and moves to a
+-- CANCELLED state; check with `status`. Takes a batch id or a file holding one.
+----------------------------------------------------------------------
+
+local function cmd_stop(arg1)
+  if not arg1 then die("usage: translation_job.lua stop <batch.txt|id>") end
+  if not KEY then die("no API key") end
+
+  local name = arg1
+  if file_exists(arg1) then name = read_file(arg1):gsub("%s+", "") end
+  if name == "" then die("empty batch id in " .. arg1) end
+
+  local resp = sh(table.concat({
+    "curl -sS -X POST", q(API .. "/" .. name .. ":cancel"),
+    "-H " .. q("x-goog-api-key: " .. KEY),
+    "-H " .. q("Content-Type: application/json"),
+  }, " "))
+
+  local err = sh("printf %s " .. q(resp) .. " | jq -r '.error.message // empty'")
+  if err ~= "" then die("cancel failed: " .. err) end
+
+  print("cancel requested for " .. name)
+  print("(verify with: translation_job.lua status " .. arg1 .. ")")
+end
+
+----------------------------------------------------------------------
 -- dispatch
 ----------------------------------------------------------------------
 
@@ -524,6 +551,8 @@ elseif mode == "status" then
   local names = {}
   for i = 2, #arg do names[#names + 1] = arg[i] end
   cmd_status(names)
+elseif mode == "stop" then
+  cmd_stop(arg[2])
 elseif mode == "quick" then
   cmd_quick(arg[2], arg[3])
 else
@@ -532,5 +561,6 @@ else
       "  translation_job.lua resume <resume.txt>\n" ..
       "  translation_job.lua get    <batch.txt> <out_dir>\n" ..
       "  translation_job.lua status [batch.txt|id ...]\n" ..
+      "  translation_job.lua stop   <batch.txt|id>\n" ..
       "  translation_job.lua quick  <in.txt> [out.txt]")
 end
