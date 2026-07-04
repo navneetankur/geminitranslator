@@ -2,8 +2,9 @@
 -- translation_job.lua — translate Chinese webnovel chapters via Gemini batch API
 --
 -- Usage:
---   translation_job.lua send <to_translate_dir>    -> upload + submit a batch, id to batch.txt
---   translation_job.lua get  <batch.txt> <out_dir> -> if done, download + write translations
+--   translation_job.lua send  <to_translate_dir>    -> upload + submit a batch, id to batch.txt
+--   translation_job.lua get   <batch.txt> <out_dir> -> if done, download + write translations
+--   translation_job.lua quick <in.txt> [out.txt]    -> translate one chapter now (no batch)
 --
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
 -- Files API (the flaky, retryable step), then create the batch pointing at
@@ -88,6 +89,18 @@ local function list_inputs(dir)
   return files
 end
 
+-- find the prompt: <dir>/prompt.txt, else the global config prompt
+local function resolve_prompt(dir)
+  local p = dir .. "/prompt.txt"
+  if not file_exists(p) then
+    p = (os.getenv("HOME") or "") .. "/.config/geminitran/prompt.txt"
+  end
+  if not file_exists(p) then
+    die("no prompt at " .. dir .. "/prompt.txt or ~/.config/geminitran/prompt.txt")
+  end
+  return p
+end
+
 ----------------------------------------------------------------------
 -- Files API upload (resumable protocol)
 ----------------------------------------------------------------------
@@ -150,14 +163,7 @@ local function cmd_send(indir)
         "). Delete it to submit a new batch.")
   end
 
-  -- locate prompt file
-  local prompt_path = indir .. "/prompt.txt"
-  if not file_exists(prompt_path) then
-    prompt_path = (os.getenv("HOME") or "") .. "/.config/geminitran/prompt.txt"
-  end
-  if not file_exists(prompt_path) then
-    die("no prompt at " .. indir .. "/prompt.txt or ~/.config/geminitran/prompt.txt")
-  end
+  local prompt_path = resolve_prompt(indir)
 
   local files = list_inputs(indir)
   if #files == 0 then die("no *.txt files to translate in " .. indir) end
@@ -306,6 +312,52 @@ local function cmd_get(batchfile, outdir)
 end
 
 ----------------------------------------------------------------------
+-- quick — synchronous single-chapter translation (no batch, immediate)
+----------------------------------------------------------------------
+
+local function cmd_quick(infile, outfile)
+  if not infile then die("usage: translation_job.lua quick <in.txt> [out.txt]") end
+  if not KEY then die("no API key") end
+  if not file_exists(infile) then die("no such file: " .. infile) end
+
+  local dir = infile:match("^(.*)/[^/]*$") or "."
+  local prompt_path = resolve_prompt(dir)
+
+  local payload = os.tmpname()
+  sh("jq -n --rawfile prompt " .. q(prompt_path) .. " --rawfile body " .. q(infile) ..
+     " '{contents:[{parts:[{text:($prompt + \"\\n\\n\" + $body)}]}]}' > " .. q(payload))
+
+  local respfile = os.tmpname()
+  sh(table.concat({
+    "curl -sS -X POST", q(API .. "/models/" .. MODEL .. ":generateContent"),
+    "-H " .. q("x-goog-api-key: " .. KEY),
+    "-H " .. q("Content-Type: application/json"),
+    "-d @" .. q(payload),
+    "-o " .. q(respfile),
+  }, " "))
+  os.remove(payload)
+
+  local err = sh("jq -r '.error.message // empty' " .. q(respfile))
+  if err ~= "" then os.remove(respfile); die("API error: " .. err) end
+
+  local finish = sh("jq -r '.candidates[0].finishReason // \"\"' " .. q(respfile))
+  local text   = sh("jq -r '[ .candidates[0].content.parts[]?.text ] | join(\"\")' " .. q(respfile))
+  os.remove(respfile)
+
+  if text == "" then die("no translation returned (finishReason=" .. finish .. ")") end
+  if finish ~= "STOP" and finish ~= "" then
+    io.stderr:write("warning: finishReason=" .. finish .. " (translation may be truncated)\n")
+  end
+
+  if outfile then
+    write_file(outfile, text .. "\n")
+    print("wrote " .. outfile .. " (finishReason=" .. finish .. ")")
+  else
+    io.write(text, "\n")
+  end
+end
+
+----------------------------------------------------------------------
 -- dispatch
 ----------------------------------------------------------------------
 
@@ -314,8 +366,11 @@ if mode == "send" then
   cmd_send(arg[2])
 elseif mode == "get" then
   cmd_get(arg[2], arg[3])
+elseif mode == "quick" then
+  cmd_quick(arg[2], arg[3])
 else
   die("usage:\n" ..
-      "  translation_job.lua send <to_translate_dir>\n" ..
-      "  translation_job.lua get  <batch.txt> <out_dir>")
+      "  translation_job.lua send  <to_translate_dir>\n" ..
+      "  translation_job.lua get   <batch.txt> <out_dir>\n" ..
+      "  translation_job.lua quick <in.txt> [out.txt]")
 end
