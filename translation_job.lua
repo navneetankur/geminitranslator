@@ -328,7 +328,7 @@ local function cmd_get(batchfile, outdir)
       local text = sh("printf %s " .. q(b64) .. " | base64 -d")
       local path = outdir .. "/" .. key
       if status == "ok" then
-        write_file(path, text)
+        write_file(path, text .. "\n")
         wrote = wrote + 1
       elseif status == "truncated" then
         -- keep whatever partial text came back, but mark it clearly
