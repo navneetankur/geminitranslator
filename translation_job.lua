@@ -175,8 +175,8 @@ local function find_batch_by_input(fname)
     "curl -sS", q(API .. "/batches?pageSize=100"),
     "-H " .. q("x-goog-api-key: " .. KEY),
   }, " "))
-  -- the array field is documented only as a ListOperationsResponse; accept either name
-  local filter = "(.operations // .batches // [])[] " ..
+  -- list responses wrap the batches in .operations (// [] guards an empty list)
+  local filter = "(.operations // [])[] " ..
                  "| select(.metadata.inputConfig.fileName == $f) | .name"
   return sh("printf %s " .. q(resp) .. " | jq -r --arg f " .. q(fname) ..
             " " .. q(filter) .. " | head -n1")
@@ -437,27 +437,30 @@ end
 -- composes in shells: translation_job.lua status batch.txt && echo ready
 ----------------------------------------------------------------------
 
--- three fields from a single operation (a GET-by-name response)
+-- fields from a single operation (a GET-by-name response)
 local STATUS3 = '[ (.metadata.state // .state // "UNKNOWN"),' ..
   ' (.metadata.batchStats.successfulRequestCount // 0),' ..
-  ' (.metadata.batchStats.requestCount // 0) ] | @tsv'
--- name + those three, per operation in a list response
-local STATUS_LIST = '(.operations // .batches // [])[] | [ .name,' ..
+  ' (.metadata.batchStats.requestCount // 0),' ..
+  ' (.metadata.inputConfig.fileName // "-") ] | @tsv'
+-- name + those fields, per operation in a list response
+local STATUS_LIST = '(.operations // [])[] | [ .name,' ..
   ' (.metadata.state // .state // "UNKNOWN"),' ..
   ' (.metadata.batchStats.successfulRequestCount // 0),' ..
-  ' (.metadata.batchStats.requestCount // 0) ] | @tsv'
+  ' (.metadata.batchStats.requestCount // 0),' ..
+  ' (.metadata.inputConfig.fileName // "-") ] | @tsv'
 
 local function cmd_status(names)
   if not KEY then die("no API key") end
 
   local any_done = false
-  local function report(label, state, succ, total)
+  local function report(label, state, succ, total, file)
     state = (state and state ~= "") and state or "UNKNOWN"
-    print(string.format("%-46s %-24s %s/%s", label, state, succ or "0", total or "0"))
+    print(string.format("%-46s %-24s %-9s %s",
+      label, state, (succ or "0") .. "/" .. (total or "0"), file or "-"))
     if state:match("SUCCEEDED") or state == "DONE" then any_done = true end
   end
 
-  print(string.format("%-46s %-24s %s", "BATCH", "STATE", "DONE/TOTAL"))
+  print(string.format("%-46s %-24s %-9s %s", "BATCH", "STATE", "DONE/TOT", "INPUT"))
 
   if #names == 0 then
     -- list every batch
@@ -469,8 +472,8 @@ local function cmd_status(names)
     local out = sh("jq -r " .. q(STATUS_LIST) .. " " .. q(tmp))
     os.remove(tmp)
     for line in out:gmatch("[^\n]+") do
-      local name, st, su, to = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-      report(name or "?", st, su, to)
+      local name, st, su, to, fn = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+      report(name or "?", st, su, to, fn)
     end
   else
     -- check the specific batches given (id, or a file holding one)
@@ -482,8 +485,8 @@ local function cmd_status(names)
         "-H " .. q("x-goog-api-key: " .. KEY),
       }, " "))
       local row = sh("printf %s " .. q(resp) .. " | jq -r " .. q(STATUS3))
-      local st, su, to = row:match("^([^\t]*)\t([^\t]*)\t([^\t]*)$")
-      report(arg, st, su, to)
+      local st, su, to, fn = row:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+      report(arg, st, su, to, fn)
     end
   end
 
