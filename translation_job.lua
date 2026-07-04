@@ -165,6 +165,22 @@ local function create_batch(fname)
   return sh("printf %s " .. q(resp) .. " | jq -r '.name // empty'"), resp
 end
 
+-- list batches and return the name of one whose input file == `fname`, else "".
+-- Lets us detect a batch that was actually created even though its create
+-- response was lost (so we never recorded the name). NOTE: only scans the
+-- first page (pageSize=100); a just-created batch is expected to be there.
+local function find_batch_by_input(fname)
+  local resp = sh(table.concat({
+    "curl -sS", q(API .. "/batches?pageSize=100"),
+    "-H " .. q("x-goog-api-key: " .. KEY),
+  }, " "))
+  -- the array field is documented only as a ListOperationsResponse; accept either name
+  local filter = "(.operations // .batches // [])[] " ..
+                 "| select(.metadata.inputConfig.fileName == $f) | .name"
+  return sh("printf %s " .. q(resp) .. " | jq -r --arg f " .. q(fname) ..
+            " " .. q(filter) .. " | head -n1")
+end
+
 ----------------------------------------------------------------------
 -- send
 ----------------------------------------------------------------------
@@ -344,6 +360,19 @@ local function cmd_resume(resumefile)
 
   local fname = read_file(resumefile):gsub("%s+", "")
   if fname == "" then die("no file handle in " .. resumefile) end
+
+  -- guard against a duplicate: the earlier create may have actually
+  -- succeeded even though its response was lost. If a batch already
+  -- references this upload, adopt it instead of creating a second one.
+  print("checking whether a batch already used this upload ...")
+  local existing = find_batch_by_input(fname)
+  if existing ~= "" then
+    write_file(F_BATCH, existing .. "\n")
+    os.remove(resumefile)
+    print("a batch already exists for this upload (earlier submit had succeeded): " .. existing)
+    print("wrote id to " .. F_BATCH)
+    return
+  end
 
   print("resuming from " .. fname .. " ...")
   local batch_name, resp = create_batch(fname)
