@@ -208,28 +208,20 @@ end
 -- get
 ----------------------------------------------------------------------
 
--- PROVISIONAL: the docs are vague on where a *file-based* result points to
--- its output file, so we coalesce the likely candidates. If `get` says it
--- succeeded but finds no file, inspect batch_result.json and pin the path.
-local OUTFILE = table.concat({
-  ".response.responsesFile",
-  ".metadata.output.responsesFile",
-  ".dest.responsesFile",
-  ".dest.fileName",
-  ".dest.file_name",
-  "empty",
-}, " // ")
+-- the completed batch points at its output file here (confirmed against a real run)
+local OUTFILE = ".response.responsesFile // empty"
 
 -- per-line filter over the downloaded results JSONL -> key<TAB>ok<TAB>reason<TAB>b64(text).
--- ok is false for API errors or a truncated/blocked finishReason, so callers
--- can warn+skip instead of writing an empty/partial file.
+-- ok requires an actual candidate that finished with STOP; anything else (an
+-- error line, a truncated MAX_TOKENS, or an unrecognized shape with no
+-- candidate) is ok=false, so callers warn+skip instead of writing an
+-- empty/partial file.
 local RESULT_LINE = [[
   (.response.candidates[0]) as $c
   | { key:    .key,
-      ok:     ( ((.response.error // .error) == null)
-                and (($c.finishReason // "STOP") == "STOP") ),
-      reason: ( $c.finishReason
-                // (.response.error.message // .error.message // "no-candidate") ),
+      ok:     ( $c != null and .response.error == null and $c.finishReason == "STOP" ),
+      reason: ( if $c == null then (.response.error.message // "no-candidate")
+                else $c.finishReason end ),
       text:   ( [ $c.content.parts[]?.text ] | join("") ) }
   | "\(.key)\t\(.ok)\t\(.reason)\t\(.text | @base64)"
 ]]
