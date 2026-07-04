@@ -455,30 +455,37 @@ end
 -- composes in shells: translation_job.lua status batch.txt && echo ready
 ----------------------------------------------------------------------
 
--- fields from a single operation (a GET-by-name response)
+-- fields from a single operation (a GET-by-name response). responsesFile is
+-- the output file; it only appears once the batch has finished.
 local STATUS3 = '[ (.metadata.state // .state // "UNKNOWN"),' ..
   ' (.metadata.batchStats.successfulRequestCount // 0),' ..
   ' (.metadata.batchStats.requestCount // 0),' ..
-  ' (.metadata.inputConfig.fileName // "-") ] | @tsv'
+  ' (.metadata.inputConfig.fileName // "-"),' ..
+  ' (.response.responsesFile // "-") ] | @tsv'
 -- name + those fields, per operation in a list response
 local STATUS_LIST = '(.operations // [])[] | [ .name,' ..
   ' (.metadata.state // .state // "UNKNOWN"),' ..
   ' (.metadata.batchStats.successfulRequestCount // 0),' ..
   ' (.metadata.batchStats.requestCount // 0),' ..
-  ' (.metadata.inputConfig.fileName // "-") ] | @tsv'
+  ' (.metadata.inputConfig.fileName // "-"),' ..
+  ' (.response.responsesFile // "-") ] | @tsv'
 
 local function cmd_status(names)
   if not KEY then die("no API key") end
 
   local any_done = false
-  local function report(label, state, succ, total, file)
+  local finished = {} -- {label, input, output} per SUCCEEDED batch, for the delete reminder
+  local function report(label, state, succ, total, file, outfile)
     state = (state and state ~= "") and state or "UNKNOWN"
-    print(string.format("%-46s %-24s %-9s %s",
-      label, state, (succ or "0") .. "/" .. (total or "0"), file or "-"))
-    if state:match("SUCCEEDED") or state == "DONE" then any_done = true end
+    print(string.format("%-46s %-24s %-9s %-50s %s",
+      label, state, (succ or "0") .. "/" .. (total or "0"), file or "-", outfile or "-"))
+    if state:match("SUCCEEDED") or state == "DONE" then
+      any_done = true
+      finished[#finished + 1] = { label = label, input = file, output = outfile }
+    end
   end
 
-  print(string.format("%-46s %-24s %-9s %s", "BATCH", "STATE", "DONE/TOT", "INPUT"))
+  print(string.format("%-46s %-24s %-9s %-50s %s", "BATCH", "STATE", "DONE/TOT", "INPUT", "OUTPUT"))
 
   if #names == 0 then
     -- list every batch
@@ -490,8 +497,8 @@ local function cmd_status(names)
     local out = sh("jq -r " .. q(STATUS_LIST) .. " " .. q(tmp))
     os.remove(tmp)
     for line in out:gmatch("[^\n]+") do
-      local name, st, su, to, fn = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-      report(name or "?", st, su, to, fn)
+      local name, st, su, to, fn, of = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+      report(name or "?", st, su, to, fn, of)
     end
   else
     -- check the specific batches given (id, or a file holding one)
@@ -503,8 +510,28 @@ local function cmd_status(names)
         "-H " .. q("x-goog-api-key: " .. KEY),
       }, " "))
       local row = sh("printf %s " .. q(resp) .. " | jq -r " .. q(STATUS3))
-      local st, su, to, fn = row:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-      report(arg, st, su, to, fn)
+      local st, su, to, fn, of = row:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+      report(arg, st, su, to, fn, of)
+    end
+  end
+
+  -- output files never expire (confirmed: expirationTime is null), so remind
+  -- the user to delete both files of every finished batch. Output is marked
+  -- (required) — but only after `get` has pulled the results to disk.
+  local self = arg[0] or "translation_job.lua"
+  for _, b in ipairs(finished) do
+    local has_out = b.output and b.output ~= "-" and b.output ~= ""
+    local has_in  = b.input  and b.input  ~= "-" and b.input  ~= ""
+    if has_out or has_in then
+      print("")
+      print("finished " .. b.label .. " — delete its server-side files (they do not expire):")
+      if has_out then
+        print("  (required) " .. self .. " delete-file " .. b.output ..
+              "   # only after `get` has downloaded the results")
+      end
+      if has_in then
+        print("             " .. self .. " delete-file " .. b.input)
+      end
     end
   end
 
