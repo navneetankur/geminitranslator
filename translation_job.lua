@@ -20,6 +20,11 @@ local UPLOAD   = "https://generativelanguage.googleapis.com/upload/v1beta/files"
 local DOWNLOAD = "https://generativelanguage.googleapis.com/download/v1beta"
 local KEY      = dofile(os.getenv("HOME").."/.config/geminitran/toktok.txt")
 
+-- generation knobs, shared by `send` (batch) and `quick` so both produce the
+-- same output. low temperature = faithful, consistent translation; thinking
+-- disabled (flash-lite default, pinned so a default flip won't surprise us).
+local GENCONFIG = '{temperature:0.3, thinkingConfig:{thinkingBudget:0}}'
+
 -- files we intentionally keep on disk (for debugging / resume)
 local F_JSONL   = "batch_input.jsonl"   -- the request payload we upload
 local F_RESUME  = "resume.txt"          -- uploaded file handle (breadcrumb)
@@ -216,7 +221,7 @@ local function cmd_send(indir)
       "--arg key " .. q(name),
       "--rawfile prompt " .. q(prompt_path),
       "--rawfile body " .. q(indir .. "/" .. name),
-      "-n " .. q('{key:$key, request:{contents:[{parts:[{text:($prompt + "\\n\\n" + $body)}]}]}}'),
+      "-n " .. q('{key:$key, request:{contents:[{parts:[{text:($prompt + "\\n\\n" + $body)}]}], generationConfig:' .. GENCONFIG .. '}}'),
     }, " "))
     out:write(line, "\n")
   end
@@ -409,7 +414,8 @@ local function cmd_quick(infile, outfile)
 
   local payload = os.tmpname()
   sh("jq -n --rawfile prompt " .. q(prompt_path) .. " --rawfile body " .. q(infile) ..
-     " '{contents:[{parts:[{text:($prompt + \"\\n\\n\" + $body)}]}]}' > " .. q(payload))
+     " " .. q('{contents:[{parts:[{text:($prompt + "\\n\\n" + $body)}]}], generationConfig:' .. GENCONFIG .. '}') ..
+     " > " .. q(payload))
 
   local respfile = os.tmpname()
   sh(table.concat({
