@@ -224,7 +224,7 @@ local function cmd_send(indir)
       "--arg key " .. q(name),
       "--rawfile prompt " .. q(prompt_path),
       "--rawfile body " .. q(indir .. "/" .. name),
-      "-n " .. q('{key:$key, request:{contents:[{parts:[{text:($prompt + "\\n\\n" + $body)}]}], generationConfig:' .. GENCONFIG .. '}}'),
+      "-n " .. q('{key:$key, request:{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:$body}]}], generationConfig:' .. GENCONFIG .. '}}'),
     }, " "))
     out:write(line, "\n")
   end
@@ -417,7 +417,7 @@ local function cmd_quick(infile, outfile)
 
   local payload = os.tmpname()
   sh("jq -n --rawfile prompt " .. q(prompt_path) .. " --rawfile body " .. q(infile) ..
-     " " .. q('{contents:[{parts:[{text:($prompt + "\\n\\n" + $body)}]}], generationConfig:' .. GENCONFIG .. '}') ..
+     " " .. q('{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:$body}]}], generationConfig:' .. GENCONFIG .. '}') ..
      " > " .. q(payload))
 
   local respfile = os.tmpname()
