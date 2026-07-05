@@ -11,6 +11,11 @@
 --   translation_job.lua delete-job  <batch.txt|id>   -> delete the batch job (and its output file)
 --   translation_job.lua quick  <in.txt> [out.txt]    -> translate one chapter now (no batch)
 --
+-- Flags (send, quick):
+--   --prompt <file>   file supplying the system-instruction text; repeat to
+--                     concat. Overrides the prompt.txt /
+--                     ~/.config/geminitran/prompt.txt lookup.
+--
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
 -- Files API (the flaky, retryable step), then create the batch pointing at
 -- the uploaded file (the cheap commit). See notes/overview.md.
@@ -111,6 +116,24 @@ local function resolve_prompt(dir)
   return p
 end
 
+-- pick the system-instruction prompt file. If any --prompt flags were given,
+-- each names a file; their contents are concatenated into a temp file so the
+-- rest of the pipeline can keep passing a path to jq's --rawfile. Returns the
+-- path and a boolean saying whether it's a temp file the caller must os.remove.
+local function build_prompt_path(dir, prompts)
+  if prompts and #prompts > 0 then
+    local tmp = os.tmpname()
+    local parts = {}
+    for _, p in ipairs(prompts) do
+      if not file_exists(p) then die("no such --prompt file: " .. p) end
+      parts[#parts + 1] = read_file(p)
+    end
+    write_file(tmp, table.concat(parts))
+    return tmp, true
+  end
+  return resolve_prompt(dir), false
+end
+
 ----------------------------------------------------------------------
 -- Files API upload (resumable protocol)
 ----------------------------------------------------------------------
@@ -194,7 +217,7 @@ end
 -- send
 ----------------------------------------------------------------------
 
-local function cmd_send(indir)
+local function cmd_send(indir, prompts)
   if not indir then die("usage: translation_job.lua send <dir>") end
   if not KEY then die("no API key") end
   indir = indir:gsub("/+$", "")
@@ -211,7 +234,7 @@ local function cmd_send(indir)
         "  or start over: rm " .. F_RESUME)
   end
 
-  local prompt_path = resolve_prompt(indir)
+  local prompt_path, prompt_tmp = build_prompt_path(indir, prompts)
 
   local files = list_inputs(indir)
   if #files == 0 then die("no *.txt files to translate in " .. indir) end
@@ -229,6 +252,7 @@ local function cmd_send(indir)
     out:write(line, "\n")
   end
   out:close()
+  if prompt_tmp then os.remove(prompt_path) end
   print("built " .. F_JSONL .. " (" .. #files .. " chapter(s))")
 
   -- upload (retryable; no commit yet)
@@ -407,18 +431,19 @@ end
 -- quick — synchronous single-chapter translation (no batch, immediate)
 ----------------------------------------------------------------------
 
-local function cmd_quick(infile, outfile)
+local function cmd_quick(infile, outfile, prompts)
   if not infile then die("usage: translation_job.lua quick <in.txt> [out.txt]") end
   if not KEY then die("no API key") end
   if not file_exists(infile) then die("no such file: " .. infile) end
 
   local dir = infile:match("^(.*)/[^/]*$") or "."
-  local prompt_path = resolve_prompt(dir)
+  local prompt_path, prompt_tmp = build_prompt_path(dir, prompts)
 
   local payload = os.tmpname()
   sh("jq -n --rawfile prompt " .. q(prompt_path) .. " --rawfile body " .. q(infile) ..
      " " .. q('{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:$body}]}], generationConfig:' .. GENCONFIG .. '}') ..
      " > " .. q(payload))
+  if prompt_tmp then os.remove(prompt_path) end
 
   local respfile = os.tmpname()
   sh(table.concat({
@@ -622,25 +647,47 @@ end
 -- dispatch
 ----------------------------------------------------------------------
 
+-- pull repeatable flags (--prompt) out of argv, leaving the positional args.
+-- --prompt names a file supplying the system-instruction text (repeat to
+-- concat), overriding the prompt.txt lookup; only send/quick use it.
+local function parse_flags(argv)
+  local pos, prompts = {}, {}
+  local i = 1
+  while i <= #argv do
+    local a = argv[i]
+    if a == "--prompt" then
+      i = i + 1
+      if not argv[i] then die("--prompt needs a file") end
+      prompts[#prompts + 1] = argv[i]
+    else
+      pos[#pos + 1] = a
+    end
+    i = i + 1
+  end
+  return pos, prompts
+end
+
 local mode = arg[1]
+local argv = {}
+for i = 2, #arg do argv[#argv + 1] = arg[i] end
+local pos, prompts = parse_flags(argv)
+
 if mode == "send" then
-  cmd_send(arg[2])
+  cmd_send(pos[1], prompts)
 elseif mode == "resume" then
-  cmd_resume(arg[2])
+  cmd_resume(pos[1])
 elseif mode == "get" then
-  cmd_get(arg[2], arg[3])
+  cmd_get(pos[1], pos[2])
 elseif mode == "status" then
-  local names = {}
-  for i = 2, #arg do names[#names + 1] = arg[i] end
-  cmd_status(names)
+  cmd_status(pos)
 elseif mode == "stop" then
-  cmd_stop(arg[2])
+  cmd_stop(pos[1])
 elseif mode == "delete-file" then
-  cmd_delete_file(arg[2])
+  cmd_delete_file(pos[1])
 elseif mode == "delete-job" then
-  cmd_delete_job(arg[2])
+  cmd_delete_job(pos[1])
 elseif mode == "quick" then
-  cmd_quick(arg[2], arg[3])
+  cmd_quick(pos[1], pos[2], prompts)
 else
   die("usage:\n" ..
       "  translation_job.lua send   <to_translate_dir>\n" ..
