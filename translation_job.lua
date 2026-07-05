@@ -50,6 +50,8 @@ local F_RESUME  = "resume.txt"          -- uploaded file handle (breadcrumb)
 local F_BATCH   = "batch.txt"           -- submitted batch/operation name
 local F_RAW     = "batch_result.json"   -- raw GET response from `get`
 local F_RESULTS = "batch_results.jsonl" -- downloaded results file
+local F_QUICK_REQ = "quick_request.json"  -- request payload `quick` sends
+local F_QUICK_RAW = "quick_result.json"   -- raw generateContent response from `quick`
 
 ----------------------------------------------------------------------
 -- small helpers
@@ -487,7 +489,7 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking)
   local prompt_path, prompt_tmp = build_prompt_path(dir, prompts)
   local prefix_path = build_prefix_path(prefixes)
 
-  local payload = os.tmpname()
+  local payload = F_QUICK_REQ
   sh("jq -n --rawfile prompt " .. q(prompt_path) .. " --rawfile prefix " .. q(prefix_path) ..
      " --rawfile body " .. q(infile) ..
      " " .. q('{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:($prefix + $body)}]}], generationConfig:' .. gen_config(thinking) .. '}') ..
@@ -495,7 +497,7 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking)
   if prompt_tmp then os.remove(prompt_path) end
   os.remove(prefix_path)
 
-  local respfile = os.tmpname()
+  local respfile = F_QUICK_RAW
   sh(table.concat({
     "curl -sS -X POST", q(API .. "/models/" .. MODEL .. ":generateContent"),
     "-H " .. q("x-goog-api-key: " .. KEY),
@@ -503,14 +505,12 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking)
     "-d @" .. q(payload),
     "-o " .. q(respfile),
   }, " "))
-  os.remove(payload)
 
   local err = sh("jq -r '.error.message // empty' " .. q(respfile))
-  if err ~= "" then os.remove(respfile); die("API error: " .. err) end
+  if err ~= "" then die("API error: " .. err) end
 
   local finish = sh("jq -r '.candidates[0].finishReason // \"\"' " .. q(respfile))
   local text   = sh("jq -r '[ .candidates[0].content.parts[]?.text ] | join(\"\")' " .. q(respfile))
-  os.remove(respfile)
 
   if text == "" then die("no translation returned (finishReason=" .. finish .. ")") end
   if finish ~= "STOP" and finish ~= "" then
@@ -520,8 +520,13 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking)
   if outfile then
     write_file(outfile, text .. "\n")
     print("wrote " .. outfile .. " (finishReason=" .. finish .. ")")
+    print("(kept " .. F_QUICK_REQ .. " and " .. F_QUICK_RAW ..
+          " for reference; remove when done: rm " .. F_QUICK_REQ .. " " .. F_QUICK_RAW .. ")")
   else
     io.write(text, "\n")
+    -- to stderr so it never lands in stdout the translation is piped from
+    io.stderr:write("(kept " .. F_QUICK_REQ .. " and " .. F_QUICK_RAW ..
+          " for reference; remove when done: rm " .. F_QUICK_REQ .. " " .. F_QUICK_RAW .. ")\n")
   end
 end
 
