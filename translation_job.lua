@@ -17,6 +17,8 @@
 --                     ~/.config/geminitran/prompt.txt lookup.
 --   --prefix <file>   file prepended to each chapter's body (the user text, not
 --                     the prompt); repeat to concat.
+--   --dry-run         (send only) assemble batch_input.jsonl.dryrun and stop —
+--                     no upload, no batch; inspect it before a real send.
 --
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
 -- Files API (the flaky, retryable step), then create the batch pointing at
@@ -236,21 +238,27 @@ end
 -- send
 ----------------------------------------------------------------------
 
-local function cmd_send(indir, prompts, prefixes)
+local function cmd_send(indir, prompts, prefixes, dryrun)
   if not indir then die("usage: translation_job.lua send <dir>") end
-  if not KEY then die("no API key") end
   indir = indir:gsub("/+$", "")
 
-  -- guard against accidentally submitting (and paying for) a second batch
-  if file_exists(F_BATCH) and read_file(F_BATCH):gsub("%s+", "") ~= "" then
-    die(F_BATCH .. " already exists (" .. read_file(F_BATCH):gsub("%s+", "") ..
-        "). Delete it to submit a new batch.")
-  end
-  -- guard against re-uploading when a prior upload was never submitted
-  if file_exists(F_RESUME) and read_file(F_RESUME):gsub("%s+", "") ~= "" then
-    die(F_RESUME .. " exists — a prior upload was not submitted.\n" ..
-        "  finish it:     translation_job.lua resume " .. F_RESUME .. "\n" ..
-        "  or start over: rm " .. F_RESUME)
+  -- a dry run only assembles the JSONL to eyeball it; it uploads nothing and
+  -- creates no batch, so it needs neither the API key nor the double-submit
+  -- guards (which would otherwise block previewing while a batch is pending).
+  if not dryrun then
+    if not KEY then die("no API key") end
+
+    -- guard against accidentally submitting (and paying for) a second batch
+    if file_exists(F_BATCH) and read_file(F_BATCH):gsub("%s+", "") ~= "" then
+      die(F_BATCH .. " already exists (" .. read_file(F_BATCH):gsub("%s+", "") ..
+          "). Delete it to submit a new batch.")
+    end
+    -- guard against re-uploading when a prior upload was never submitted
+    if file_exists(F_RESUME) and read_file(F_RESUME):gsub("%s+", "") ~= "" then
+      die(F_RESUME .. " exists — a prior upload was not submitted.\n" ..
+          "  finish it:     translation_job.lua resume " .. F_RESUME .. "\n" ..
+          "  or start over: rm " .. F_RESUME)
+    end
   end
 
   local prompt_path, prompt_tmp = build_prompt_path(indir, prompts)
@@ -259,8 +267,12 @@ local function cmd_send(indir, prompts, prefixes)
   local files = list_inputs(indir)
   if #files == 0 then die("no *.txt files to translate in " .. indir) end
 
+  -- a dry run writes to a side file so it never clobbers the real F_JSONL that
+  -- an in-flight batch was built from.
+  local jsonl = dryrun and (F_JSONL .. ".dryrun") or F_JSONL
+
   -- build the JSONL: one {"key","request"} line per chapter (jq handles escaping)
-  local out = assert(io.open(F_JSONL, "w"))
+  local out = assert(io.open(jsonl, "w"))
   for _, name in ipairs(files) do
     local line = sh(table.concat({
       "jq -c",
@@ -275,7 +287,13 @@ local function cmd_send(indir, prompts, prefixes)
   out:close()
   if prompt_tmp then os.remove(prompt_path) end
   os.remove(prefix_path)
-  print("built " .. F_JSONL .. " (" .. #files .. " chapter(s))")
+  print("built " .. jsonl .. " (" .. #files .. " chapter(s))")
+
+  if dryrun then
+    print("dry run — nothing uploaded, no batch created.")
+    print("inspect the assembled requests:  jq . " .. jsonl)
+    return
+  end
 
   -- upload (retryable; no commit yet)
   print("uploading to Files API ...")
@@ -672,13 +690,13 @@ end
 -- dispatch
 ----------------------------------------------------------------------
 
--- pull repeatable flags out of argv, leaving the positional args. --prompt
--- names a file supplying the system-instruction text (repeat to concat),
--- overriding the prompt.txt lookup. --prefix names a file whose contents are
--- prepended to each chapter's body (repeat to concat). Both apply only to
--- send/quick.
+-- pull flags out of argv, leaving the positional args. --prompt names a file
+-- supplying the system-instruction text (repeat to concat), overriding the
+-- prompt.txt lookup. --prefix names a file whose contents are prepended to each
+-- chapter's body (repeat to concat). --dry-run makes `send` assemble the JSONL
+-- and stop (no upload, no batch). All apply only to send/quick.
 local function parse_flags(argv)
-  local pos, prompts, prefixes = {}, {}, {}
+  local pos, prompts, prefixes, dryrun = {}, {}, {}, false
   local i = 1
   while i <= #argv do
     local a = argv[i]
@@ -690,21 +708,23 @@ local function parse_flags(argv)
       i = i + 1
       if not argv[i] then die("--prefix needs a file") end
       prefixes[#prefixes + 1] = argv[i]
+    elseif a == "--dry-run" then
+      dryrun = true
     else
       pos[#pos + 1] = a
     end
     i = i + 1
   end
-  return pos, prompts, prefixes
+  return pos, prompts, prefixes, dryrun
 end
 
 local mode = arg[1]
 local argv = {}
 for i = 2, #arg do argv[#argv + 1] = arg[i] end
-local pos, prompts, prefixes = parse_flags(argv)
+local pos, prompts, prefixes, dryrun = parse_flags(argv)
 
 if mode == "send" then
-  cmd_send(pos[1], prompts, prefixes)
+  cmd_send(pos[1], prompts, prefixes, dryrun)
 elseif mode == "resume" then
   cmd_resume(pos[1])
 elseif mode == "get" then
