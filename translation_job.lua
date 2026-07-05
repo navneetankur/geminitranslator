@@ -17,7 +17,8 @@
 --                     ~/.config/geminitran/prompt.txt lookup.
 --   --prefix <file>   file prepended to each chapter's body (the user text, not
 --                     the prompt); repeat to concat.
---   --thinking <n>    thinking-token budget for the model (default 0 = off).
+--   --thinking <n>    thinking-token budget: 0 = off (default), -1 = auto (let
+--                     the model decide), or a positive token budget.
 --   --dry-run         (send only) assemble batch_input.jsonl.dryrun and stop —
 --                     no upload, no batch; inspect it before a real send.
 --
@@ -720,8 +721,8 @@ local function parse_flags(argv)
     elseif a == "--thinking" then
       i = i + 1
       thinking = tonumber(argv[i])
-      if not thinking or thinking < 0 or thinking ~= math.floor(thinking) then
-        die("--thinking needs a non-negative integer token budget")
+      if not thinking or thinking < -1 or thinking ~= math.floor(thinking) then
+        die("--thinking needs a token budget: -1 (auto), 0 (off), or a positive integer")
       end
     else
       pos[#pos + 1] = a
