@@ -119,9 +119,10 @@ local function resolve_prompt(dir)
 end
 
 -- pick the system-instruction prompt file. If any --prompt flags were given,
--- each names a file; their contents are concatenated into a temp file so the
--- rest of the pipeline can keep passing a path to jq's --rawfile. Returns the
--- path and a boolean saying whether it's a temp file the caller must os.remove.
+-- each names a file; their contents are joined with a newline into a temp file
+-- (the newline keeps files that lack a trailing one from running together) so
+-- the rest of the pipeline can keep passing a path to jq's --rawfile. Returns
+-- the path and a boolean saying whether it's a temp file the caller os.removes.
 local function build_prompt_path(dir, prompts)
   if prompts and #prompts > 0 then
     local tmp = os.tmpname()
@@ -130,16 +131,17 @@ local function build_prompt_path(dir, prompts)
       if not file_exists(p) then die("no such --prompt file: " .. p) end
       parts[#parts + 1] = read_file(p)
     end
-    write_file(tmp, table.concat(parts))
+    write_file(tmp, table.concat(parts, "\n"))
     return tmp, true
   end
   return resolve_prompt(dir), false
 end
 
--- concatenate the --prefix files (if any) into a temp file whose contents are
--- prepended to each chapter's body (part of the user text, not the system
--- instruction). Always returns a temp path the caller must os.remove; the file
--- is empty when no --prefix was given, so ($prefix + $body) is a no-op then.
+-- join the --prefix files (if any) with a newline into a temp file whose
+-- contents are prepended to each chapter's body (part of the user text, not the
+-- system instruction). A trailing newline is added so the prefix doesn't run
+-- into the body in ($prefix + $body). Always returns a temp path the caller
+-- must os.remove; the file is empty when no --prefix was given (a no-op).
 local function build_prefix_path(prefixes)
   local tmp = os.tmpname()
   local parts = {}
@@ -147,7 +149,7 @@ local function build_prefix_path(prefixes)
     if not file_exists(p) then die("no such --prefix file: " .. p) end
     parts[#parts + 1] = read_file(p)
   end
-  write_file(tmp, table.concat(parts))
+  write_file(tmp, #parts > 0 and (table.concat(parts, "\n") .. "\n") or "")
   return tmp
 end
 
