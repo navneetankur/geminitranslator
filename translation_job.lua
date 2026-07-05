@@ -17,6 +17,7 @@
 --                     ~/.config/geminitran/prompt.txt lookup.
 --   --prefix <file>   file prepended to each chapter's body (the user text, not
 --                     the prompt); repeat to concat.
+--   --thinking <n>    thinking-token budget for the model (default 0 = off).
 --   --dry-run         (send only) assemble batch_input.jsonl.dryrun and stop —
 --                     no upload, no batch; inspect it before a real send.
 --
@@ -26,6 +27,7 @@
 --
 -- Requires: curl, jq, file(1). API key is read from the dofile below.
 
+-- local MODEL    = "gemini-2.5-flash"
 local MODEL    = "gemini-2.5-flash-lite"
 local API      = "https://generativelanguage.googleapis.com/v1beta"
 local UPLOAD   = "https://generativelanguage.googleapis.com/upload/v1beta/files"
@@ -34,8 +36,12 @@ local KEY      = dofile(os.getenv("HOME").."/.config/geminitran/toktok.txt")
 
 -- generation knobs, shared by `send` (batch) and `quick` so both produce the
 -- same output. low temperature = faithful, consistent translation; thinking
--- disabled (flash-lite default, pinned so a default flip won't surprise us).
-local GENCONFIG = '{temperature:0.3, thinkingConfig:{thinkingBudget:0}}'
+-- disabled by default (flash-lite default, pinned so a default flip won't
+-- surprise us) but bumpable per-run with --thinking <budget>.
+local function gen_config(thinking)
+  return string.format(
+    '{temperature:0.3, thinkingConfig:{thinkingBudget:%d}}', thinking or 0)
+end
 
 -- files we intentionally keep on disk (for debugging / resume)
 local F_JSONL   = "batch_input.jsonl"   -- the request payload we upload
@@ -238,7 +244,7 @@ end
 -- send
 ----------------------------------------------------------------------
 
-local function cmd_send(indir, prompts, prefixes, dryrun)
+local function cmd_send(indir, prompts, prefixes, dryrun, thinking)
   if not indir then die("usage: translation_job.lua send <dir>") end
   indir = indir:gsub("/+$", "")
 
@@ -280,7 +286,7 @@ local function cmd_send(indir, prompts, prefixes, dryrun)
       "--rawfile prompt " .. q(prompt_path),
       "--rawfile prefix " .. q(prefix_path),
       "--rawfile body " .. q(indir .. "/" .. name),
-      "-n " .. q('{key:$key, request:{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:($prefix + $body)}]}], generationConfig:' .. GENCONFIG .. '}}'),
+      "-n " .. q('{key:$key, request:{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:($prefix + $body)}]}], generationConfig:' .. gen_config(thinking) .. '}}'),
     }, " "))
     out:write(line, "\n")
   end
@@ -471,7 +477,7 @@ end
 -- quick — synchronous single-chapter translation (no batch, immediate)
 ----------------------------------------------------------------------
 
-local function cmd_quick(infile, outfile, prompts, prefixes)
+local function cmd_quick(infile, outfile, prompts, prefixes, thinking)
   if not infile then die("usage: translation_job.lua quick <in.txt> [out.txt]") end
   if not KEY then die("no API key") end
   if not file_exists(infile) then die("no such file: " .. infile) end
@@ -483,7 +489,7 @@ local function cmd_quick(infile, outfile, prompts, prefixes)
   local payload = os.tmpname()
   sh("jq -n --rawfile prompt " .. q(prompt_path) .. " --rawfile prefix " .. q(prefix_path) ..
      " --rawfile body " .. q(infile) ..
-     " " .. q('{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:($prefix + $body)}]}], generationConfig:' .. GENCONFIG .. '}') ..
+     " " .. q('{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:($prefix + $body)}]}], generationConfig:' .. gen_config(thinking) .. '}') ..
      " > " .. q(payload))
   if prompt_tmp then os.remove(prompt_path) end
   os.remove(prefix_path)
@@ -694,9 +700,10 @@ end
 -- supplying the system-instruction text (repeat to concat), overriding the
 -- prompt.txt lookup. --prefix names a file whose contents are prepended to each
 -- chapter's body (repeat to concat). --dry-run makes `send` assemble the JSONL
--- and stop (no upload, no batch). All apply only to send/quick.
+-- and stop (no upload, no batch). --thinking <budget> sets the model's thinking
+-- token budget (default 0 = off). All apply only to send/quick.
 local function parse_flags(argv)
-  local pos, prompts, prefixes, dryrun = {}, {}, {}, false
+  local pos, prompts, prefixes, dryrun, thinking = {}, {}, {}, false, nil
   local i = 1
   while i <= #argv do
     local a = argv[i]
@@ -710,21 +717,27 @@ local function parse_flags(argv)
       prefixes[#prefixes + 1] = argv[i]
     elseif a == "--dry-run" then
       dryrun = true
+    elseif a == "--thinking" then
+      i = i + 1
+      thinking = tonumber(argv[i])
+      if not thinking or thinking < 0 or thinking ~= math.floor(thinking) then
+        die("--thinking needs a non-negative integer token budget")
+      end
     else
       pos[#pos + 1] = a
     end
     i = i + 1
   end
-  return pos, prompts, prefixes, dryrun
+  return pos, prompts, prefixes, dryrun, thinking
 end
 
 local mode = arg[1]
 local argv = {}
 for i = 2, #arg do argv[#argv + 1] = arg[i] end
-local pos, prompts, prefixes, dryrun = parse_flags(argv)
+local pos, prompts, prefixes, dryrun, thinking = parse_flags(argv)
 
 if mode == "send" then
-  cmd_send(pos[1], prompts, prefixes, dryrun)
+  cmd_send(pos[1], prompts, prefixes, dryrun, thinking)
 elseif mode == "resume" then
   cmd_resume(pos[1])
 elseif mode == "get" then
@@ -738,7 +751,7 @@ elseif mode == "delete-file" then
 elseif mode == "delete-job" then
   cmd_delete_job(pos[1])
 elseif mode == "quick" then
-  cmd_quick(pos[1], pos[2], prompts, prefixes)
+  cmd_quick(pos[1], pos[2], prompts, prefixes, thinking)
 else
   die("usage:\n" ..
       "  translation_job.lua send   <to_translate_dir>\n" ..
