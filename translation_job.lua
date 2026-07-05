@@ -50,8 +50,8 @@ local F_RESUME  = "resume.txt"          -- uploaded file handle (breadcrumb)
 local F_BATCH   = "batch.txt"           -- submitted batch/operation name
 local F_RAW     = "batch_result.json"   -- raw GET response from `get`
 local F_RESULTS = "batch_results.jsonl" -- downloaded results file
-local F_QUICK_REQ = "quick_request.json"  -- request payload `quick` sends
-local F_QUICK_RAW = "quick_result.json"   -- raw generateContent response from `quick`
+-- `quick`'s kept debug files are named per-input (quick_<base>.request/result.json)
+-- so parallel runs on different chapters don't clobber each other; see cmd_quick.
 
 ----------------------------------------------------------------------
 -- small helpers
@@ -488,6 +488,12 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking)
   local dir = infile:match("^(.*)/[^/]*$") or "."
   local prompt_path, prompt_tmp = build_prompt_path(dir, prompts)
   local prefix_path = build_prefix_path(prefixes)
+
+  -- name the kept debug files after the input (12.txt -> quick_12.request.json)
+  -- so two `quick` runs on different chapters don't overwrite each other's files.
+  local base = (infile:match("([^/]+)$") or infile):gsub("%.txt$", "")
+  local F_QUICK_REQ = "quick_" .. base .. ".request.json"
+  local F_QUICK_RAW = "quick_" .. base .. ".result.json"
 
   local payload = F_QUICK_REQ
   sh("jq -n --rawfile prompt " .. q(prompt_path) .. " --rawfile prefix " .. q(prefix_path) ..
