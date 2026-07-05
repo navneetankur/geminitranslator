@@ -4,3 +4,6 @@ resume.txt
 batch.txt
 batch_result.json
 batch_results.jsonl
+# per-input debug files kept by `quick` (quick_<chapter>.request/result.json)
+quick_*.request.json
+quick_*.result.json

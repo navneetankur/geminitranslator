@@ -495,6 +495,13 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking)
   local F_QUICK_REQ = "quick_" .. base .. ".request.json"
   local F_QUICK_RAW = "quick_" .. base .. ".result.json"
 
+  -- both files are kept (success or failure) for debugging; remind to clean up.
+  -- to stderr so it never lands in stdout when the translation is piped from it.
+  local function remind()
+    io.stderr:write("(kept " .. F_QUICK_REQ .. " and " .. F_QUICK_RAW ..
+      " for debugging; remove when done: rm " .. F_QUICK_REQ .. " " .. F_QUICK_RAW .. ")\n")
+  end
+
   local payload = F_QUICK_REQ
   sh("jq -n --rawfile prompt " .. q(prompt_path) .. " --rawfile prefix " .. q(prefix_path) ..
      " --rawfile body " .. q(infile) ..
@@ -513,12 +520,12 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking)
   }, " "))
 
   local err = sh("jq -r '.error.message // empty' " .. q(respfile))
-  if err ~= "" then die("API error: " .. err) end
+  if err ~= "" then remind(); die("API error: " .. err) end
 
   local finish = sh("jq -r '.candidates[0].finishReason // \"\"' " .. q(respfile))
   local text   = sh("jq -r '[ .candidates[0].content.parts[]?.text ] | join(\"\")' " .. q(respfile))
 
-  if text == "" then die("no translation returned (finishReason=" .. finish .. ")") end
+  if text == "" then remind(); die("no translation returned (finishReason=" .. finish .. ")") end
   if finish ~= "STOP" and finish ~= "" then
     io.stderr:write("warning: finishReason=" .. finish .. " (translation may be truncated)\n")
   end
@@ -526,14 +533,10 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking)
   if outfile then
     write_file(outfile, text .. "\n")
     print("wrote " .. outfile .. " (finishReason=" .. finish .. ")")
-    print("(kept " .. F_QUICK_REQ .. " and " .. F_QUICK_RAW ..
-          " for reference; remove when done: rm " .. F_QUICK_REQ .. " " .. F_QUICK_RAW .. ")")
   else
     io.write(text, "\n")
-    -- to stderr so it never lands in stdout the translation is piped from
-    io.stderr:write("(kept " .. F_QUICK_REQ .. " and " .. F_QUICK_RAW ..
-          " for reference; remove when done: rm " .. F_QUICK_REQ .. " " .. F_QUICK_RAW .. ")\n")
   end
+  remind()
 end
 
 ----------------------------------------------------------------------
