@@ -15,6 +15,8 @@
 --   --prompt <file>   file supplying the system-instruction text; repeat to
 --                     concat. Overrides the prompt.txt /
 --                     ~/.config/geminitran/prompt.txt lookup.
+--   --prefix <file>   file prepended to each chapter's body (the user text, not
+--                     the prompt); repeat to concat.
 --
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
 -- Files API (the flaky, retryable step), then create the batch pointing at
@@ -134,6 +136,21 @@ local function build_prompt_path(dir, prompts)
   return resolve_prompt(dir), false
 end
 
+-- concatenate the --prefix files (if any) into a temp file whose contents are
+-- prepended to each chapter's body (part of the user text, not the system
+-- instruction). Always returns a temp path the caller must os.remove; the file
+-- is empty when no --prefix was given, so ($prefix + $body) is a no-op then.
+local function build_prefix_path(prefixes)
+  local tmp = os.tmpname()
+  local parts = {}
+  for _, p in ipairs(prefixes or {}) do
+    if not file_exists(p) then die("no such --prefix file: " .. p) end
+    parts[#parts + 1] = read_file(p)
+  end
+  write_file(tmp, table.concat(parts))
+  return tmp
+end
+
 ----------------------------------------------------------------------
 -- Files API upload (resumable protocol)
 ----------------------------------------------------------------------
@@ -217,7 +234,7 @@ end
 -- send
 ----------------------------------------------------------------------
 
-local function cmd_send(indir, prompts)
+local function cmd_send(indir, prompts, prefixes)
   if not indir then die("usage: translation_job.lua send <dir>") end
   if not KEY then die("no API key") end
   indir = indir:gsub("/+$", "")
@@ -235,6 +252,7 @@ local function cmd_send(indir, prompts)
   end
 
   local prompt_path, prompt_tmp = build_prompt_path(indir, prompts)
+  local prefix_path = build_prefix_path(prefixes)
 
   local files = list_inputs(indir)
   if #files == 0 then die("no *.txt files to translate in " .. indir) end
@@ -246,13 +264,15 @@ local function cmd_send(indir, prompts)
       "jq -c",
       "--arg key " .. q(name),
       "--rawfile prompt " .. q(prompt_path),
+      "--rawfile prefix " .. q(prefix_path),
       "--rawfile body " .. q(indir .. "/" .. name),
-      "-n " .. q('{key:$key, request:{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:$body}]}], generationConfig:' .. GENCONFIG .. '}}'),
+      "-n " .. q('{key:$key, request:{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:($prefix + $body)}]}], generationConfig:' .. GENCONFIG .. '}}'),
     }, " "))
     out:write(line, "\n")
   end
   out:close()
   if prompt_tmp then os.remove(prompt_path) end
+  os.remove(prefix_path)
   print("built " .. F_JSONL .. " (" .. #files .. " chapter(s))")
 
   -- upload (retryable; no commit yet)
@@ -431,19 +451,22 @@ end
 -- quick — synchronous single-chapter translation (no batch, immediate)
 ----------------------------------------------------------------------
 
-local function cmd_quick(infile, outfile, prompts)
+local function cmd_quick(infile, outfile, prompts, prefixes)
   if not infile then die("usage: translation_job.lua quick <in.txt> [out.txt]") end
   if not KEY then die("no API key") end
   if not file_exists(infile) then die("no such file: " .. infile) end
 
   local dir = infile:match("^(.*)/[^/]*$") or "."
   local prompt_path, prompt_tmp = build_prompt_path(dir, prompts)
+  local prefix_path = build_prefix_path(prefixes)
 
   local payload = os.tmpname()
-  sh("jq -n --rawfile prompt " .. q(prompt_path) .. " --rawfile body " .. q(infile) ..
-     " " .. q('{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:$body}]}], generationConfig:' .. GENCONFIG .. '}') ..
+  sh("jq -n --rawfile prompt " .. q(prompt_path) .. " --rawfile prefix " .. q(prefix_path) ..
+     " --rawfile body " .. q(infile) ..
+     " " .. q('{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:($prefix + $body)}]}], generationConfig:' .. GENCONFIG .. '}') ..
      " > " .. q(payload))
   if prompt_tmp then os.remove(prompt_path) end
+  os.remove(prefix_path)
 
   local respfile = os.tmpname()
   sh(table.concat({
@@ -647,11 +670,13 @@ end
 -- dispatch
 ----------------------------------------------------------------------
 
--- pull repeatable flags (--prompt) out of argv, leaving the positional args.
--- --prompt names a file supplying the system-instruction text (repeat to
--- concat), overriding the prompt.txt lookup; only send/quick use it.
+-- pull repeatable flags out of argv, leaving the positional args. --prompt
+-- names a file supplying the system-instruction text (repeat to concat),
+-- overriding the prompt.txt lookup. --prefix names a file whose contents are
+-- prepended to each chapter's body (repeat to concat). Both apply only to
+-- send/quick.
 local function parse_flags(argv)
-  local pos, prompts = {}, {}
+  local pos, prompts, prefixes = {}, {}, {}
   local i = 1
   while i <= #argv do
     local a = argv[i]
@@ -659,21 +684,25 @@ local function parse_flags(argv)
       i = i + 1
       if not argv[i] then die("--prompt needs a file") end
       prompts[#prompts + 1] = argv[i]
+    elseif a == "--prefix" then
+      i = i + 1
+      if not argv[i] then die("--prefix needs a file") end
+      prefixes[#prefixes + 1] = argv[i]
     else
       pos[#pos + 1] = a
     end
     i = i + 1
   end
-  return pos, prompts
+  return pos, prompts, prefixes
 end
 
 local mode = arg[1]
 local argv = {}
 for i = 2, #arg do argv[#argv + 1] = arg[i] end
-local pos, prompts = parse_flags(argv)
+local pos, prompts, prefixes = parse_flags(argv)
 
 if mode == "send" then
-  cmd_send(pos[1], prompts)
+  cmd_send(pos[1], prompts, prefixes)
 elseif mode == "resume" then
   cmd_resume(pos[1])
 elseif mode == "get" then
@@ -687,7 +716,7 @@ elseif mode == "delete-file" then
 elseif mode == "delete-job" then
   cmd_delete_job(pos[1])
 elseif mode == "quick" then
-  cmd_quick(pos[1], pos[2], prompts)
+  cmd_quick(pos[1], pos[2], prompts, prefixes)
 else
   die("usage:\n" ..
       "  translation_job.lua send   <to_translate_dir>\n" ..
