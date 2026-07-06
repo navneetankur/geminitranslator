@@ -64,6 +64,11 @@ local MODELS = {
   ["2.5fl"]                 = "gemini-2.5-flash-lite",
 }
 
+-- the script's own name, for the usage/reminder messages it prints. A constant
+-- rather than arg[0] so the output is stable regardless of how it was invoked;
+-- change it here if the file is ever renamed.
+local PROG     = "translation_job.lua"
+
 local API      = "https://generativelanguage.googleapis.com/v1beta"
 local UPLOAD   = "https://generativelanguage.googleapis.com/upload/v1beta/files"
 local DOWNLOAD = "https://generativelanguage.googleapis.com/download/v1beta"
@@ -319,7 +324,7 @@ end
 ----------------------------------------------------------------------
 
 local function cmd_send(indir, prompts, prefixes, dryrun, thinking, include_thoughts)
-  if not indir then die("usage: translation_job.lua send <dir>") end
+  if not indir then die("usage: " .. PROG .. " send <dir>") end
   indir = indir:gsub("/+$", "")
 
   -- a dry run only assembles the JSONL to eyeball it; it uploads nothing and
@@ -336,7 +341,7 @@ local function cmd_send(indir, prompts, prefixes, dryrun, thinking, include_thou
     -- guard against re-uploading when a prior upload was never submitted
     if file_exists(F_RESUME) and read_file(F_RESUME):gsub("%s+", "") ~= "" then
       die(F_RESUME .. " exists — a prior upload was not submitted.\n" ..
-          "  finish it:     translation_job.lua resume " .. F_RESUME .. "\n" ..
+          "  finish it:     " .. PROG .. " resume " .. F_RESUME .. "\n" ..
           "  or start over: rm " .. F_RESUME)
     end
   end
@@ -385,7 +390,7 @@ local function cmd_send(indir, prompts, prefixes, dryrun, thinking, include_thou
   local batch_name, resp = create_batch(fname)
   if batch_name == "" then
     die("upload succeeded but the batch was not created:\n" .. resp ..
-        "\n  the upload is saved — finish with: translation_job.lua resume " .. F_RESUME)
+        "\n  the upload is saved — finish with: " .. PROG .. " resume " .. F_RESUME)
   end
 
   write_file(F_BATCH, batch_name .. "\n")
@@ -421,7 +426,7 @@ local RESULT_LINE = [[
 
 local function cmd_get(batchfile, outdir)
   if not batchfile or not outdir then
-    die("usage: translation_job.lua get <batch.txt|id> <out_dir>")
+    die("usage: " .. PROG .. " get <batch.txt|id> <out_dir>")
   end
   if not KEY then die("no API key") end
   outdir = outdir:gsub("/+$", "")
@@ -551,7 +556,7 @@ end
 ----------------------------------------------------------------------
 
 local function cmd_quick(infile, outfile, prompts, prefixes, thinking, retry, include_thoughts)
-  if not infile then die("usage: translation_job.lua quick <in.txt> [out.txt]") end
+  if not infile then die("usage: " .. PROG .. " quick <in.txt> [out.txt]") end
   if not KEY then die("no API key") end
   if not file_exists(infile) then die("no such file: " .. infile) end
 
@@ -694,7 +699,6 @@ local function cmd_status(names)
   -- ~48h after it finishes and GC takes the output file down with it. So the
   -- real deadline is: run `get` within 48h. Deleting by hand is optional and
   -- only frees Files-API quota sooner.
-  local self = arg[0] or "translation_job.lua"
   for _, b in ipairs(finished) do
     local has_out = b.output and b.output ~= "-" and b.output ~= ""
     local has_in  = b.input  and b.input  ~= "-" and b.input  ~= ""
@@ -703,11 +707,11 @@ local function cmd_status(names)
       print("finished " .. b.label .. " — run `get` within ~48h (the batch and its " ..
             "output are auto-purged after that). free quota sooner with:")
       if has_out then
-        print("  " .. self .. " delete-job " .. b.label ..
+        print("  " .. PROG .. " delete-job " .. b.label ..
               "   # removes the batch + its output file (after `get`)")
       end
       if has_in then
-        print("  " .. self .. " delete-file " .. b.input ..
+        print("  " .. PROG .. " delete-file " .. b.input ..
               "   # the uploaded input; delete-job does NOT remove it")
       end
     end
@@ -722,7 +726,7 @@ end
 ----------------------------------------------------------------------
 
 local function cmd_stop(arg1)
-  if not arg1 then die("usage: translation_job.lua stop <batch.txt|id>") end
+  if not arg1 then die("usage: " .. PROG .. " stop <batch.txt|id>") end
   if not KEY then die("no API key") end
 
   local name = resolve_batch(arg1)
@@ -737,7 +741,7 @@ local function cmd_stop(arg1)
   if err ~= "" then die("cancel failed: " .. err) end
 
   print("cancel requested for " .. name)
-  print("(verify with: translation_job.lua status " .. arg1 .. ")")
+  print("(verify with: " .. PROG .. " status " .. arg1 .. ")")
 end
 
 ----------------------------------------------------------------------
@@ -748,7 +752,7 @@ end
 ----------------------------------------------------------------------
 
 local function cmd_delete_file(name)
-  if not name then die("usage: translation_job.lua delete-file <files/xxx>") end
+  if not name then die("usage: " .. PROG .. " delete-file <files/xxx>") end
   if not KEY then die("no API key") end
   name = name:gsub("%s+", "")
   if name == "" then die("empty file name") end
@@ -772,7 +776,7 @@ end
 ----------------------------------------------------------------------
 
 local function cmd_delete_job(arg1)
-  if not arg1 then die("usage: translation_job.lua delete-job <batch.txt|id>") end
+  if not arg1 then die("usage: " .. PROG .. " delete-job <batch.txt|id>") end
   if not KEY then die("no API key") end
 
   local name = resolve_batch(arg1)
@@ -865,12 +869,12 @@ elseif mode == "quick" then
   cmd_quick(pos[1], pos[2], prompts, prefixes, thinking, retry, include_thoughts)
 else
   die("usage:\n" ..
-      "  translation_job.lua send   <to_translate_dir>\n" ..
-      "  translation_job.lua resume <resume.txt>\n" ..
-      "  translation_job.lua get    <batch.txt|id> <out_dir>\n" ..
-      "  translation_job.lua status [batch.txt|id ...]\n" ..
-      "  translation_job.lua stop   <batch.txt|id>\n" ..
-      "  translation_job.lua delete-file <files/xxx>\n" ..
-      "  translation_job.lua delete-job  <batch.txt|id>\n" ..
-      "  translation_job.lua quick  <in.txt> [out.txt]")
+      "  " .. PROG .. " send   <to_translate_dir>\n" ..
+      "  " .. PROG .. " resume <resume.txt>\n" ..
+      "  " .. PROG .. " get    <batch.txt|id> <out_dir>\n" ..
+      "  " .. PROG .. " status [batch.txt|id ...]\n" ..
+      "  " .. PROG .. " stop   <batch.txt|id>\n" ..
+      "  " .. PROG .. " delete-file <files/xxx>\n" ..
+      "  " .. PROG .. " delete-job  <batch.txt|id>\n" ..
+      "  " .. PROG .. " quick  <in.txt> [out.txt]")
 end
