@@ -12,6 +12,9 @@
 --   translation_job.lua quick  <in.txt> [out.txt]    -> translate one chapter now (no batch)
 --
 -- Flags (send, quick):
+--   --model <name>    model to use: a full name (gemini-2.5-flash) or a short
+--                     alias (2.5, 2.5f, 2.5l, ...). See the MODELS table /
+--                     models.md. Default: gemini-2.5-flash-lite.
 --   --prompt <file>   file supplying the system-instruction text; repeat to
 --                     concat. Overrides the prompt.txt /
 --                     ~/.config/geminitran/prompt.txt lookup.
@@ -39,7 +42,29 @@
 
 -- local MODEL    = "gemini-3.1-flash-lite"
 -- local MODEL    = "gemini-2.5-flash"
-local MODEL    = "gemini-2.5-flash-lite"
+local MODEL    = "gemini-2.5-flash-lite"  -- default; override with --model
+
+-- --model accepts a full name or a short alias; both map to the full name used
+-- in the API path. Full names are keys too (they resolve to themselves), so any
+-- valid --model value is a key here — an unknown value is rejected. Mirrors
+-- models.md.
+local MODELS = {
+  ["gemini-3.5-flash"]      = "gemini-3.5-flash",
+  ["3.5"]                   = "gemini-3.5-flash",
+  ["3.5f"]                  = "gemini-3.5-flash",
+  ["gemini-3.1-flash-lite"] = "gemini-3.1-flash-lite",
+  ["3.1l"]                  = "gemini-3.1-flash-lite",
+  ["3.1fl"]                 = "gemini-3.1-flash-lite",
+  ["gemini-2.5-pro"]        = "gemini-2.5-pro",
+  ["2.5p"]                  = "gemini-2.5-pro",
+  ["gemini-2.5-flash"]      = "gemini-2.5-flash",
+  ["2.5"]                   = "gemini-2.5-flash",
+  ["2.5f"]                  = "gemini-2.5-flash",
+  ["gemini-2.5-flash-lite"] = "gemini-2.5-flash-lite",
+  ["2.5l"]                  = "gemini-2.5-flash-lite",
+  ["2.5fl"]                 = "gemini-2.5-flash-lite",
+}
+
 local API      = "https://generativelanguage.googleapis.com/v1beta"
 local UPLOAD   = "https://generativelanguage.googleapis.com/upload/v1beta/files"
 local DOWNLOAD = "https://generativelanguage.googleapis.com/download/v1beta"
@@ -764,13 +789,16 @@ end
 -- pull flags out of argv, leaving the positional args. --prompt names a file
 -- supplying the system-instruction text (repeat to concat), overriding the
 -- prompt.txt lookup. --prefix names a file whose contents are prepended to each
--- chapter's body (repeat to concat). --dry-run makes `send` assemble the JSONL
+-- chapter's body (repeat to concat). --model picks the model by full name or
+-- alias (returned as the resolved full name, or nil for the default).
+-- --dry-run makes `send` assemble the JSONL
 -- and stop (no upload, no batch). --thinking <budget> sets the model's thinking
 -- token budget (default 0 = off). --include-thoughts returns the thinking
 -- summary in the response. All apply only to send/quick.
 local function parse_flags(argv)
   local pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts =
     {}, {}, {}, false, nil, false, false
+  local model = nil
   local i = 1
   while i <= #argv do
     local a = argv[i]
@@ -782,6 +810,11 @@ local function parse_flags(argv)
       i = i + 1
       if not argv[i] then die("--prefix needs a file") end
       prefixes[#prefixes + 1] = argv[i]
+    elseif a == "--model" then
+      i = i + 1
+      if not argv[i] then die("--model needs a model name or alias") end
+      model = MODELS[argv[i]]
+      if not model then die("unknown --model: " .. argv[i]) end
     elseif a == "--dry-run" then
       dryrun = true
     elseif a == "--retry" then
@@ -799,13 +832,14 @@ local function parse_flags(argv)
     end
     i = i + 1
   end
-  return pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts
+  return pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts, model
 end
 
 local mode = arg[1]
 local argv = {}
 for i = 2, #arg do argv[#argv + 1] = arg[i] end
-local pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts = parse_flags(argv)
+local pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts, model = parse_flags(argv)
+if model then MODEL = model end
 
 if mode == "send" then
   cmd_send(pos[1], prompts, prefixes, dryrun, thinking, include_thoughts)
