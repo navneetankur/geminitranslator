@@ -16,7 +16,9 @@
 --                     concat. Overrides the prompt.txt /
 --                     ~/.config/geminitran/prompt.txt lookup.
 --   --prefix <file>   file prepended to each chapter's body (the user text, not
---                     the prompt); repeat to concat.
+--                     the prompt); repeat to concat. Overrides the prefix.txt /
+--                     ~/.config/geminitran/prefix.txt lookup (which is required
+--                     — make it an empty file to no-op the prefix).
 --   --thinking <n>    thinking-token budget: 0 = off (default), -1 = auto (let
 --                     the model decide), or a positive token budget.
 --   --dry-run         (send only) assemble batch_input.jsonl.dryrun and stop —
@@ -103,12 +105,12 @@ local function numkey(name)
   return n and tonumber(n) or math.huge
 end
 
--- list *.txt files in dir (excluding prompt.txt), sorted numerically then by name
+-- list *.txt files in dir (excluding prompt.txt/prefix.txt), sorted numerically then by name
 local function list_inputs(dir)
   local out = sh("ls -1 " .. q(dir) .. " 2>/dev/null")
   local files = {}
   for name in out:gmatch("[^\n]+") do
-    if name:match("%.txt$") and name ~= "prompt.txt" then
+    if name:match("%.txt$") and name ~= "prompt.txt" and name ~= "prefix.txt" then
       files[#files + 1] = name
     end
   end
@@ -132,6 +134,20 @@ local function resolve_prompt(dir)
   return p
 end
 
+-- find the prefix, using the same search path as the prompt:
+-- <dir>/prefix.txt, else the global config prefix. Required like the prompt —
+-- a missing file is an error; make it an empty file to no-op the prefix.
+local function resolve_prefix(dir)
+  local p = dir .. "/prefix.txt"
+  if not file_exists(p) then
+    p = (os.getenv("HOME") or "") .. "/.config/geminitran/prefix.txt"
+  end
+  if not file_exists(p) then
+    die("no prefix at " .. dir .. "/prefix.txt or ~/.config/geminitran/prefix.txt")
+  end
+  return p
+end
+
 -- pick the system-instruction prompt file. If any --prompt flags were given,
 -- each names a file; their contents are joined with a newline into a temp file
 -- (the newline keeps files that lack a trailing one from running together) so
@@ -151,19 +167,28 @@ local function build_prompt_path(dir, prompts)
   return resolve_prompt(dir), false
 end
 
--- join the --prefix files (if any) with a newline into a temp file whose
--- contents are prepended to each chapter's body (part of the user text, not the
--- system instruction). A trailing newline is added so the prefix doesn't run
--- into the body in ($prefix + $body). Always returns a temp path the caller
--- must os.remove; the file is empty when no --prefix was given (a no-op).
-local function build_prefix_path(prefixes)
+-- join the --prefix files with a newline into a temp file whose contents are
+-- prepended to each chapter's body (part of the user text, not the system
+-- instruction). A trailing newline is added so the prefix doesn't run into the
+-- body in ($prefix + $body). When no --prefix flag is given, falls back to the
+-- prefix.txt / ~/.config/geminitran/prefix.txt lookup (resolve_prefix), which
+-- is required — make it an empty file to no-op the prefix. Always returns a
+-- temp path the caller must os.remove.
+local function build_prefix_path(dir, prefixes)
   local tmp = os.tmpname()
   local parts = {}
-  for _, p in ipairs(prefixes or {}) do
-    if not file_exists(p) then die("no such --prefix file: " .. p) end
-    parts[#parts + 1] = read_file(p)
+  if prefixes and #prefixes > 0 then
+    for _, p in ipairs(prefixes) do
+      if not file_exists(p) then die("no such --prefix file: " .. p) end
+      parts[#parts + 1] = read_file(p)
+    end
+  else
+    parts[#parts + 1] = read_file(resolve_prefix(dir))
   end
-  write_file(tmp, #parts > 0 and (table.concat(parts, "\n") .. "\n") or "")
+  -- add the body-separating newline only when there's actual prefix text, so an
+  -- empty prefix.txt is a true no-op (no stray leading blank line on each body).
+  local text = table.concat(parts, "\n")
+  write_file(tmp, text ~= "" and (text .. "\n") or "")
   return tmp
 end
 
@@ -274,7 +299,7 @@ local function cmd_send(indir, prompts, prefixes, dryrun, thinking)
   end
 
   local prompt_path, prompt_tmp = build_prompt_path(indir, prompts)
-  local prefix_path = build_prefix_path(prefixes)
+  local prefix_path = build_prefix_path(indir, prefixes)
 
   local files = list_inputs(indir)
   if #files == 0 then die("no *.txt files to translate in " .. indir) end
@@ -490,7 +515,7 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking, retry)
 
   local dir = infile:match("^(.*)/[^/]*$") or "."
   local prompt_path, prompt_tmp = build_prompt_path(dir, prompts)
-  local prefix_path = build_prefix_path(prefixes)
+  local prefix_path = build_prefix_path(dir, prefixes)
 
   -- name the kept debug files after the input (12.txt -> quick_12.request.json)
   -- so two `quick` runs on different chapters don't overwrite each other's files.
