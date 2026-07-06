@@ -523,19 +523,14 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking, retry)
   }, " ")
 
   -- 503 = "model overloaded, try again later" — transient. With --retry, resend
-  -- with exponential backoff (2,4,8,... capped at 32s) up to a few attempts; the
   -- last response is left in respfile so the error path below reports it normally.
-  local MAX_ATTEMPTS = 6
+  local MAX_ATTEMPTS = 1000
   local attempt = 1
   while true do
     sh(curl)
     local code = sh("jq -r '.error.code // empty' " .. q(respfile))
     if code ~= "503" or not retry or attempt >= MAX_ATTEMPTS then break end
-    local delay = math.min(2 ^ attempt, 32)
-    io.stderr:write(string.format(
-      "503 (model overloaded); retrying in %ds (attempt %d/%d) ...\n",
-      delay, attempt + 1, MAX_ATTEMPTS))
-    os.execute("sleep " .. delay)
+    os.execute("sleep 4")
     attempt = attempt + 1
   end
 
