@@ -21,6 +21,11 @@
 --                     — make it an empty file to no-op the prefix).
 --   --thinking <n>    thinking-token budget: 0 = off (default), -1 = auto (let
 --                     the model decide), or a positive token budget.
+--   --include-thoughts  ask the API to return the model's thinking summary
+--                     (includeThoughts=true). Only meaningful with --thinking
+--                     != 0. The thoughts stay in the raw result JSON for
+--                     inspection; they are stripped from the written
+--                     translation so they never pollute the output.
 --   --dry-run         (send only) assemble batch_input.jsonl.dryrun and stop —
 --                     no upload, no batch; inspect it before a real send.
 --   --retry           (quick only) on HTTP 503 (model overloaded), resend with
@@ -43,10 +48,14 @@ local KEY      = dofile(os.getenv("HOME").."/.config/geminitran/toktok.txt")
 -- generation knobs, shared by `send` (batch) and `quick` so both produce the
 -- same output. low temperature = faithful, consistent translation; thinking
 -- disabled by default (flash-lite default, pinned so a default flip won't
--- surprise us) but bumpable per-run with --thinking <budget>.
-local function gen_config(thinking)
+-- surprise us) but bumpable per-run with --thinking <budget>. include_thoughts
+-- (--include-thoughts) adds includeThoughts:true so the response carries the
+-- thinking summary; only useful when thinking != 0.
+local function gen_config(thinking, include_thoughts)
+  local thoughts = include_thoughts and ", includeThoughts:true" or ""
   return string.format(
-    '{temperature:0.3, thinkingConfig:{thinkingBudget:%d}}', thinking or 0)
+    '{temperature:0.3, thinkingConfig:{thinkingBudget:%d%s}}',
+    thinking or 0, thoughts)
 end
 
 -- files we intentionally keep on disk (for debugging / resume)
@@ -275,7 +284,7 @@ end
 -- send
 ----------------------------------------------------------------------
 
-local function cmd_send(indir, prompts, prefixes, dryrun, thinking)
+local function cmd_send(indir, prompts, prefixes, dryrun, thinking, include_thoughts)
   if not indir then die("usage: translation_job.lua send <dir>") end
   indir = indir:gsub("/+$", "")
 
@@ -317,7 +326,7 @@ local function cmd_send(indir, prompts, prefixes, dryrun, thinking)
       "--rawfile prompt " .. q(prompt_path),
       "--rawfile prefix " .. q(prefix_path),
       "--rawfile body " .. q(indir .. "/" .. name),
-      "-n " .. q('{key:$key, request:{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:($prefix + $body)}]}], generationConfig:' .. gen_config(thinking) .. '}}'),
+      "-n " .. q('{key:$key, request:{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:($prefix + $body)}]}], generationConfig:' .. gen_config(thinking, include_thoughts) .. '}}'),
     }, " "))
     out:write(line, "\n")
   end
@@ -372,7 +381,7 @@ local RESULT_LINE = [[
                 else "truncated" end ),
       reason: ( if $c == null then (.response.error.message // "no-candidate")
                 else ($c.finishReason // "unknown") end ),
-      text:   ( [ $c.content.parts[]?.text ] | join("") ) }
+      text:   ( [ $c.content.parts[]? | select(.thought != true) | .text ] | join("") ) }
   | "\(.key)\t\(.status)\t\(.reason)\t\(.text | @base64)"
 ]]
 
@@ -508,7 +517,7 @@ end
 -- quick — synchronous single-chapter translation (no batch, immediate)
 ----------------------------------------------------------------------
 
-local function cmd_quick(infile, outfile, prompts, prefixes, thinking, retry)
+local function cmd_quick(infile, outfile, prompts, prefixes, thinking, retry, include_thoughts)
   if not infile then die("usage: translation_job.lua quick <in.txt> [out.txt]") end
   if not KEY then die("no API key") end
   if not file_exists(infile) then die("no such file: " .. infile) end
@@ -533,7 +542,7 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking, retry)
   local payload = F_QUICK_REQ
   sh("jq -n --rawfile prompt " .. q(prompt_path) .. " --rawfile prefix " .. q(prefix_path) ..
      " --rawfile body " .. q(infile) ..
-     " " .. q('{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:($prefix + $body)}]}], generationConfig:' .. gen_config(thinking) .. '}') ..
+     " " .. q('{system_instruction:{parts:[{text:$prompt}]}, contents:[{parts:[{text:($prefix + $body)}]}], generationConfig:' .. gen_config(thinking, include_thoughts) .. '}') ..
      " > " .. q(payload))
   if prompt_tmp then os.remove(prompt_path) end
   os.remove(prefix_path)
@@ -564,7 +573,7 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking, retry)
   if err ~= "" then remind(); die("API error: " .. err) end
 
   local finish = sh("jq -r '.candidates[0].finishReason // \"\"' " .. q(respfile))
-  local text   = sh("jq -r '[ .candidates[0].content.parts[]?.text ] | join(\"\")' " .. q(respfile))
+  local text   = sh("jq -r '[ .candidates[0].content.parts[]? | select(.thought != true) | .text ] | join(\"\")' " .. q(respfile))
 
   if text == "" then remind(); die("no translation returned (finishReason=" .. finish .. ")") end
   if finish ~= "STOP" and finish ~= "" then
@@ -757,9 +766,11 @@ end
 -- prompt.txt lookup. --prefix names a file whose contents are prepended to each
 -- chapter's body (repeat to concat). --dry-run makes `send` assemble the JSONL
 -- and stop (no upload, no batch). --thinking <budget> sets the model's thinking
--- token budget (default 0 = off). All apply only to send/quick.
+-- token budget (default 0 = off). --include-thoughts returns the thinking
+-- summary in the response. All apply only to send/quick.
 local function parse_flags(argv)
-  local pos, prompts, prefixes, dryrun, thinking, retry = {}, {}, {}, false, nil, false
+  local pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts =
+    {}, {}, {}, false, nil, false, false
   local i = 1
   while i <= #argv do
     local a = argv[i]
@@ -775,6 +786,8 @@ local function parse_flags(argv)
       dryrun = true
     elseif a == "--retry" then
       retry = true
+    elseif a == "--include-thoughts" then
+      include_thoughts = true
     elseif a == "--thinking" then
       i = i + 1
       thinking = tonumber(argv[i])
@@ -786,16 +799,16 @@ local function parse_flags(argv)
     end
     i = i + 1
   end
-  return pos, prompts, prefixes, dryrun, thinking, retry
+  return pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts
 end
 
 local mode = arg[1]
 local argv = {}
 for i = 2, #arg do argv[#argv + 1] = arg[i] end
-local pos, prompts, prefixes, dryrun, thinking, retry = parse_flags(argv)
+local pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts = parse_flags(argv)
 
 if mode == "send" then
-  cmd_send(pos[1], prompts, prefixes, dryrun, thinking)
+  cmd_send(pos[1], prompts, prefixes, dryrun, thinking, include_thoughts)
 elseif mode == "resume" then
   cmd_resume(pos[1])
 elseif mode == "get" then
@@ -809,7 +822,7 @@ elseif mode == "delete-file" then
 elseif mode == "delete-job" then
   cmd_delete_job(pos[1])
 elseif mode == "quick" then
-  cmd_quick(pos[1], pos[2], prompts, prefixes, thinking, retry)
+  cmd_quick(pos[1], pos[2], prompts, prefixes, thinking, retry, include_thoughts)
 else
   die("usage:\n" ..
       "  translation_job.lua send   <to_translate_dir>\n" ..
