@@ -21,6 +21,8 @@
 --                     the model decide), or a positive token budget.
 --   --dry-run         (send only) assemble batch_input.jsonl.dryrun and stop —
 --                     no upload, no batch; inspect it before a real send.
+--   --retry           (quick only) on HTTP 503 (model overloaded), resend with
+--                     exponential backoff up to a few attempts instead of dying.
 --
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
 -- Files API (the flaky, retryable step), then create the batch pointing at
@@ -28,6 +30,7 @@
 --
 -- Requires: curl, jq, file(1). API key is read from the dofile below.
 
+-- local MODEL    = "gemini-3.1-flash-lite"
 -- local MODEL    = "gemini-2.5-flash"
 local MODEL    = "gemini-2.5-flash-lite"
 local API      = "https://generativelanguage.googleapis.com/v1beta"
@@ -480,7 +483,7 @@ end
 -- quick — synchronous single-chapter translation (no batch, immediate)
 ----------------------------------------------------------------------
 
-local function cmd_quick(infile, outfile, prompts, prefixes, thinking)
+local function cmd_quick(infile, outfile, prompts, prefixes, thinking, retry)
   if not infile then die("usage: translation_job.lua quick <in.txt> [out.txt]") end
   if not KEY then die("no API key") end
   if not file_exists(infile) then die("no such file: " .. infile) end
@@ -511,13 +514,30 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking)
   os.remove(prefix_path)
 
   local respfile = F_QUICK_RAW
-  sh(table.concat({
+  local curl = table.concat({
     "curl -sS -X POST", q(API .. "/models/" .. MODEL .. ":generateContent"),
     "-H " .. q("x-goog-api-key: " .. KEY),
     "-H " .. q("Content-Type: application/json"),
     "-d @" .. q(payload),
     "-o " .. q(respfile),
-  }, " "))
+  }, " ")
+
+  -- 503 = "model overloaded, try again later" — transient. With --retry, resend
+  -- with exponential backoff (2,4,8,... capped at 32s) up to a few attempts; the
+  -- last response is left in respfile so the error path below reports it normally.
+  local MAX_ATTEMPTS = 6
+  local attempt = 1
+  while true do
+    sh(curl)
+    local code = sh("jq -r '.error.code // empty' " .. q(respfile))
+    if code ~= "503" or not retry or attempt >= MAX_ATTEMPTS then break end
+    local delay = math.min(2 ^ attempt, 32)
+    io.stderr:write(string.format(
+      "503 (model overloaded); retrying in %ds (attempt %d/%d) ...\n",
+      delay, attempt + 1, MAX_ATTEMPTS))
+    os.execute("sleep " .. delay)
+    attempt = attempt + 1
+  end
 
   local err = sh("jq -r '.error.message // empty' " .. q(respfile))
   if err ~= "" then remind(); die("API error: " .. err) end
@@ -718,7 +738,7 @@ end
 -- and stop (no upload, no batch). --thinking <budget> sets the model's thinking
 -- token budget (default 0 = off). All apply only to send/quick.
 local function parse_flags(argv)
-  local pos, prompts, prefixes, dryrun, thinking = {}, {}, {}, false, nil
+  local pos, prompts, prefixes, dryrun, thinking, retry = {}, {}, {}, false, nil, false
   local i = 1
   while i <= #argv do
     local a = argv[i]
@@ -732,6 +752,8 @@ local function parse_flags(argv)
       prefixes[#prefixes + 1] = argv[i]
     elseif a == "--dry-run" then
       dryrun = true
+    elseif a == "--retry" then
+      retry = true
     elseif a == "--thinking" then
       i = i + 1
       thinking = tonumber(argv[i])
@@ -743,13 +765,13 @@ local function parse_flags(argv)
     end
     i = i + 1
   end
-  return pos, prompts, prefixes, dryrun, thinking
+  return pos, prompts, prefixes, dryrun, thinking, retry
 end
 
 local mode = arg[1]
 local argv = {}
 for i = 2, #arg do argv[#argv + 1] = arg[i] end
-local pos, prompts, prefixes, dryrun, thinking = parse_flags(argv)
+local pos, prompts, prefixes, dryrun, thinking, retry = parse_flags(argv)
 
 if mode == "send" then
   cmd_send(pos[1], prompts, prefixes, dryrun, thinking)
@@ -766,7 +788,7 @@ elseif mode == "delete-file" then
 elseif mode == "delete-job" then
   cmd_delete_job(pos[1])
 elseif mode == "quick" then
-  cmd_quick(pos[1], pos[2], prompts, prefixes, thinking)
+  cmd_quick(pos[1], pos[2], prompts, prefixes, thinking, retry)
 else
   die("usage:\n" ..
       "  translation_job.lua send   <to_translate_dir>\n" ..
