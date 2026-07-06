@@ -40,9 +40,7 @@
 --
 -- Requires: curl, jq, file(1). API key is read from the dofile below.
 
--- local MODEL    = "gemini-3.1-flash-lite"
--- local MODEL    = "gemini-2.5-flash"
-local MODEL    = "gemini-2.5-flash-lite"  -- default; override with --model
+local model    = "gemini-2.5-flash-lite"  -- default; override with --model
 
 -- --model accepts a full name or a short alias; both map to the full name used
 -- in the API path. Full names are keys too (they resolve to themselves), so any
@@ -280,7 +278,7 @@ local function create_batch(fname)
   sh("jq -nc --arg f " .. q(fname) ..
      " '{batch:{display_name:\"webnovel\", input_config:{file_name:$f}}}' > " .. q(payload))
   local resp = sh(table.concat({
-    "curl -sS -X POST", q(API .. "/models/" .. MODEL .. ":batchGenerateContent"),
+    "curl -sS -X POST", q(API .. "/models/" .. model .. ":batchGenerateContent"),
     "-H " .. q("x-goog-api-key: " .. KEY),
     "-H " .. q("Content-Type: application/json"),
     "-d @" .. q(payload),
@@ -574,7 +572,7 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking, retry, in
 
   local respfile = F_QUICK_RAW
   local curl = table.concat({
-    "curl -sS -X POST", q(API .. "/models/" .. MODEL .. ":generateContent"),
+    "curl -sS -X POST", q(API .. "/models/" .. model .. ":generateContent"),
     "-H " .. q("x-goog-api-key: " .. KEY),
     "-H " .. q("Content-Type: application/json"),
     "-d @" .. q(payload),
@@ -798,7 +796,7 @@ end
 local function parse_flags(argv)
   local pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts =
     {}, {}, {}, false, nil, false, false
-  local model = nil
+  local model_flag = nil
   local i = 1
   while i <= #argv do
     local a = argv[i]
@@ -813,8 +811,8 @@ local function parse_flags(argv)
     elseif a == "--model" then
       i = i + 1
       if not argv[i] then die("--model needs a model name or alias") end
-      model = MODELS[argv[i]]
-      if not model then die("unknown --model: " .. argv[i]) end
+      model_flag = MODELS[argv[i]]
+      if not model_flag then die("unknown --model: " .. argv[i]) end
     elseif a == "--dry-run" then
       dryrun = true
     elseif a == "--retry" then
@@ -832,14 +830,14 @@ local function parse_flags(argv)
     end
     i = i + 1
   end
-  return pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts, model
+  return pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts, model_flag
 end
 
 local mode = arg[1]
 local argv = {}
 for i = 2, #arg do argv[#argv + 1] = arg[i] end
-local pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts, model = parse_flags(argv)
-if model then MODEL = model end
+local pos, prompts, prefixes, dryrun, thinking, retry, include_thoughts, model_flag = parse_flags(argv)
+if model_flag then model = model_flag end
 
 if mode == "send" then
   cmd_send(pos[1], prompts, prefixes, dryrun, thinking, include_thoughts)
