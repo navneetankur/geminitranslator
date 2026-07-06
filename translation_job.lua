@@ -127,6 +127,16 @@ local function write_file(path, content)
   f:close()
 end
 
+-- resolve a batch argument that is either a file holding the batch id or the
+-- id itself — the convention shared by get/status/stop/delete-job. Reading a
+-- file trims surrounding whitespace; an empty result is an error.
+local function resolve_batch(arg)
+  local name = arg
+  if file_exists(arg) then name = read_file(arg):gsub("%s+", "") end
+  if name == "" then die("empty batch id in " .. arg) end
+  return name
+end
+
 -- shell-quote a single argument
 local function q(s)
   return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
@@ -416,9 +426,7 @@ local function cmd_get(batchfile, outdir)
   if not KEY then die("no API key") end
   outdir = outdir:gsub("/+$", "")
 
-  local batch_name = batchfile
-  if file_exists(batchfile) then batch_name = read_file(batchfile):gsub("%s+", "") end
-  if batch_name == "" then die("empty batch id in " .. batchfile) end
+  local batch_name = resolve_batch(batchfile)
 
   local resp = sh(table.concat({
     "curl -sS", q(API .. "/" .. batch_name),
@@ -671,8 +679,7 @@ local function cmd_status(names)
   else
     -- check the specific batches given (id, or a file holding one)
     for _, arg in ipairs(names) do
-      local name = arg
-      if file_exists(arg) then name = read_file(arg):gsub("%s+", "") end
+      local name = resolve_batch(arg)
       local resp = sh(table.concat({
         "curl -sS", q(API .. "/" .. name),
         "-H " .. q("x-goog-api-key: " .. KEY),
@@ -718,9 +725,7 @@ local function cmd_stop(arg1)
   if not arg1 then die("usage: translation_job.lua stop <batch.txt|id>") end
   if not KEY then die("no API key") end
 
-  local name = arg1
-  if file_exists(arg1) then name = read_file(arg1):gsub("%s+", "") end
-  if name == "" then die("empty batch id in " .. arg1) end
+  local name = resolve_batch(arg1)
 
   local resp = sh(table.concat({
     "curl -sS -X POST", q(API .. "/" .. name .. ":cancel"),
@@ -770,9 +775,7 @@ local function cmd_delete_job(arg1)
   if not arg1 then die("usage: translation_job.lua delete-job <batch.txt|id>") end
   if not KEY then die("no API key") end
 
-  local name = arg1
-  if file_exists(arg1) then name = read_file(arg1):gsub("%s+", "") end
-  if name == "" then die("empty batch id in " .. arg1) end
+  local name = resolve_batch(arg1)
 
   local resp = sh(table.concat({
     "curl -sS -X DELETE", q(API .. "/" .. name),
