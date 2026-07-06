@@ -4,7 +4,7 @@
 -- Usage:
 --   translation_job.lua send   <to_translate_dir>    -> upload + submit a batch, id to batch.txt
 --   translation_job.lua resume <resume.txt>          -> submit a batch from an already-uploaded file
---   translation_job.lua get    <batch.txt> <out_dir> -> if done, download + write translations
+--   translation_job.lua get    <batch.txt|id> <out_dir> -> if done, download + write translations
 --   translation_job.lua status [batch.txt|id ...]    -> report batch state(s); no args = list all
 --   translation_job.lua stop   <batch.txt|id>        -> cancel a running batch
 --   translation_job.lua delete-file <files/xxx>      -> delete an uploaded input file from the Files API
@@ -411,12 +411,13 @@ local RESULT_LINE = [[
 
 local function cmd_get(batchfile, outdir)
   if not batchfile or not outdir then
-    die("usage: translation_job.lua get <batch.txt> <out_dir>")
+    die("usage: translation_job.lua get <batch.txt|id> <out_dir>")
   end
   if not KEY then die("no API key") end
   outdir = outdir:gsub("/+$", "")
 
-  local batch_name = read_file(batchfile):gsub("%s+", "")
+  local batch_name = batchfile
+  if file_exists(batchfile) then batch_name = read_file(batchfile):gsub("%s+", "") end
   if batch_name == "" then die("empty batch id in " .. batchfile) end
 
   local resp = sh(table.concat({
@@ -863,7 +864,7 @@ else
   die("usage:\n" ..
       "  translation_job.lua send   <to_translate_dir>\n" ..
       "  translation_job.lua resume <resume.txt>\n" ..
-      "  translation_job.lua get    <batch.txt> <out_dir>\n" ..
+      "  translation_job.lua get    <batch.txt|id> <out_dir>\n" ..
       "  translation_job.lua status [batch.txt|id ...]\n" ..
       "  translation_job.lua stop   <batch.txt|id>\n" ..
       "  translation_job.lua delete-file <files/xxx>\n" ..
