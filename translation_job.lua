@@ -31,8 +31,9 @@
 --                     translation so they never pollute the output.
 --   --dry-run         (send only) assemble batch_input.jsonl.dryrun and stop —
 --                     no upload, no batch; inspect it before a real send.
---   --retry           (quick only) on HTTP 503 (model overloaded), resend with
---                     exponential backoff up to a few attempts instead of dying.
+--   --retry           (quick only) on HTTP 503 (model overloaded), resend every
+--                     few seconds until it goes through instead of dying —
+--                     flash-lite routinely needs dozens of tries.
 --
 -- File-based batch flow (robust retries): build a JSONL, upload it to the
 -- Files API (the flaky, retryable step), then create the batch pointing at
@@ -579,16 +580,19 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking, retry, in
     "-o " .. q(respfile),
   }, " ")
 
-  -- 503 = "model overloaded, try again later" — transient. With --retry, resend
+  -- 503 = "model overloaded, try again later" — transient. With --retry we keep
+  -- resending after a fixed RETRY_WAIT (flash-lite often needs dozens of tries),
+  -- capped at MAX_ATTEMPTS so a genuinely stuck model can't loop forever. The
   -- last response is left in respfile so the error path below reports it normally.
+  local RETRY_WAIT   = 4    -- seconds between attempts
   local MAX_ATTEMPTS = 1000
   local attempt = 1
   while true do
     sh(curl)
     local code = sh("jq -r '.error.code // empty' " .. q(respfile))
     if code ~= "503" or not retry or attempt >= MAX_ATTEMPTS then break end
-	io.stderr:write(string.format("503 (model overloaded); retrying in %ds\n", 4))
-    os.execute("sleep 4")
+    io.stderr:write(string.format("503 (model overloaded); retrying in %ds\n", RETRY_WAIT))
+    os.execute("sleep " .. RETRY_WAIT)
     attempt = attempt + 1
   end
 
