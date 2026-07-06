@@ -530,7 +530,7 @@ local function cmd_quick(infile, outfile, prompts, prefixes, thinking, retry)
     sh(curl)
     local code = sh("jq -r '.error.code // empty' " .. q(respfile))
     if code ~= "503" or not retry or attempt >= MAX_ATTEMPTS then break end
-	io.stderr:write(string.format("503 (model overloaded); retrying in %ds", 4))
+	io.stderr:write(string.format("503 (model overloaded); retrying in %ds\n", 4))
     os.execute("sleep 4")
     attempt = attempt + 1
   end
