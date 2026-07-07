@@ -43,23 +43,16 @@
 
 local model    = "gemini-2.5-flash-lite"  -- default; override with --model
 
--- --model accepts a full name or a short alias; both map to the full name used
--- in the API path. Full names are keys too (they resolve to themselves), so any
--- valid --model value is a key here — an unknown value is rejected. Mirrors
--- models.md.
-local MODELS = {
-  ["gemini-3.5-flash"]      = "gemini-3.5-flash",
+-- --model accepts a full name or a short alias; 
+-- alises are key here. if it's not present in this table it's assumed to be full name.
+local MODEL_ALIASES = {
   ["3.5"]                   = "gemini-3.5-flash",
   ["3.5f"]                  = "gemini-3.5-flash",
-  ["gemini-3.1-flash-lite"] = "gemini-3.1-flash-lite",
   ["3.1l"]                  = "gemini-3.1-flash-lite",
   ["3.1fl"]                 = "gemini-3.1-flash-lite",
-  ["gemini-2.5-pro"]        = "gemini-2.5-pro",
   ["2.5p"]                  = "gemini-2.5-pro",
-  ["gemini-2.5-flash"]      = "gemini-2.5-flash",
   ["2.5"]                   = "gemini-2.5-flash",
   ["2.5f"]                  = "gemini-2.5-flash",
-  ["gemini-2.5-flash-lite"] = "gemini-2.5-flash-lite",
   ["2.5l"]                  = "gemini-2.5-flash-lite",
   ["2.5fl"]                 = "gemini-2.5-flash-lite",
 }
@@ -823,8 +816,8 @@ local function parse_flags(argv)
     elseif a == "--model" then
       i = i + 1
       if not argv[i] then die("--model needs a model name or alias") end
-      model_flag = MODELS[argv[i]]
-      if not model_flag then die("unknown --model: " .. argv[i]) end
+      model_flag = MODEL_ALIASES[argv[i]]
+      if not model_flag then model_flag = argv[i] end
     elseif a == "--dry-run" then
       dryrun = true
     elseif a == "--retry" then
